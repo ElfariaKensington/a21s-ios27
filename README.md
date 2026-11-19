@@ -2,6 +2,27 @@
 
 Working iOS 27 (`24A446`, XNU `12377.121.6`) port for the Samsung Galaxy A21s (`S5E3830` / Exynos 850, Mali-G52 MP1, Samsung Maxwell S612 `scsc_wlan`).
 
+## Quick Install
+
+Requirements: rooted Galaxy A21s (`SM-A217F`) in Android (Magisk/KernelSU `su`) or OrangeFox recovery with ADB connected.
+
+```bash
+# Check current dual-boot status
+./install.sh --status
+
+# Full install (Stage 1 + payload + system image with Wi-Fi + boot into iOS 27)
+./install.sh --stage1 out/a21s-stage1-boot.img \
+             --payload out/payload-ios27.bin \
+             --system out/root-slim.img \
+             --wifi "YourSSID" "YourPassword" --boot
+
+# Fast kernel-only update (preserves /data/ios/system and warmed Metal shader cache)
+./install.sh --payload out/payload-ios27.bin --boot
+
+# Clone upstream scion-kernel, apply A21s + SCSC Wi-Fi patches, build, flash, and boot
+./install.sh --setup-sources --build-kernel --boot
+```
+
 ## Hardware Status
 - **Boot & Storage**: Dual-boot Stage 1 (`recovered-a21s/a21s/boot/`) + UEFI Loader v2 (`a21s_ios27_loader.c`) + 64-bit IDMAC eMMC (`/dev/ufsroot0` over pinned `/data/ios/system` extents) + clean `XNU27LOG` panic/reboot log flushing.
 - **Graphics**: iOS 27 Liquid Glass Metal compositor (`sbgl=0 sbmtl=1`, `sgu_depth=256`, `DEXR=2`, `FLUSH=2`, `backdrop-scale=0.25`) running up to **60 FPS** (`60 swaps/s`) on Mali-G52 MP1 with transparency enabled.
