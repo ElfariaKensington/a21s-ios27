@@ -1,0 +1,3105 @@
+diff --git a/bsd/dev/a5xelte_keys.c b/bsd/dev/a5xelte_keys.c
+index 7142831..8868f44 100644
+--- a/bsd/dev/a5xelte_keys.c
++++ b/bsd/dev/a5xelte_keys.c
+@@ -24,7 +24,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+ 
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-#define A5_ALIVE_PA 0x14050000u
++#define A5_ALIVE_PA 0x11850000u
+ #define A5_GPA0_CON 0x20u
+ #define A5_GPA0_DAT 0x24u
+ #define A5_GPA0_PUD 0x28u
+@@ -133,7 +133,7 @@ void
+ a5xelte_keys_init(void)
+ {
+ 	thread_t thread;
+-	int enabled = 1;
++	int enabled = 0;
+ 	if (a5_keys_started) {
+ 		return;
+ 	}
+diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
+index 918cb55..044f9a7 100644
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -74,7 +74,7 @@ sweet_trace_match(const char *comm, int pid)
+ 		state = PE_parse_boot_argn("sweettracename", name, sizeof(name)) ? 1 : 0;
+ 	}
+ 	if (state == 0) {
+-		return pid == 1;
++		return false;
+ 	}
+ 	return strncmp(comm, name, MAXCOMLEN) == 0;
+ }
+diff --git a/bsd/dev/herolte_ufs.c b/bsd/dev/herolte_ufs.c
+index bf7d0f0..5dc544e 100644
+--- a/bsd/dev/herolte_ufs.c
++++ b/bsd/dev/herolte_ufs.c
+@@ -313,86 +313,627 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	return 0;
+ }
+ 
+-/* READ(10) of count device blocks at lba into the bounce buffer. */
++
++/* ---- Galaxy A21s (SM-A217F, Exynos 850) dwmmc0 (0x12100000) + A21SIOS1 extent map ---- */
++#define A21S_MMC_PA             0x12100000UL
++#define A21S_MMC_MAP            0x2000UL
++#define A21S_BOOT_PART_BYTES    37748736UL
++#define A21S_MAP_BYTES          65536UL
++#define A21S_LOGDUMP_FIRST      71552UL
++#define A21S_LOGDUMP_SECS       1919UL
++
++#define MMC_CTRL        0x00
++#define MMC_BLKSIZ      0x1c
++#define MMC_BYTCNT      0x20
++#define MMC_CMDARG      0x28
++#define MMC_CMD         0x2c
++#define MMC_RESP0       0x30
++#define MMC_RINTSTS     0x44
++#define MMC_STATUS      0x48
++#define MMC_HCON        0x70
++#define MMC_BMOD        0x80
++#define MMC_PLDMND      0x84
++#define MMC_DBADDRL     0x88
++#define MMC_DBADDRU     0x8c
++#define MMC_IDSTS64     0x90
++#define MMC_IDINTEN64   0x94
++#define MMC_DATA        0x200
++
++struct a21s_idmac_desc64 {
++	uint32_t des0, des1, des2, des3;
++	uint32_t des4, des5, des6, des7;
++};
++
++#define MMC_CMD_START    (1u << 31)
++#define MMC_CMD_HOLD     (1u << 29)
++#define MMC_CMD_WAITPRV  (1u << 13)
++#define MMC_CMD_AUTOSTOP (1u << 12)
++#define MMC_CMD_WR       (1u << 10)
++#define MMC_CMD_DATA     (1u << 9)
++#define MMC_CMD_CRC      (1u << 8)
++#define MMC_CMD_RESP     (1u << 6)
++
++#define MMC_INT_RE       (1u << 1)
++#define MMC_INT_CD       (1u << 2)
++#define MMC_INT_DTO      (1u << 3)
++#define MMC_INT_RCRC     (1u << 6)
++#define MMC_INT_DCRC     (1u << 7)
++#define MMC_INT_RTO      (1u << 8)
++#define MMC_INT_DRTO     (1u << 9)
++#define MMC_INT_HTO      (1u << 10)
++#define MMC_INT_HLE      (1u << 12)
++#define MMC_INT_SBE      (1u << 13)
++#define MMC_INT_ACD      (1u << 14)
++#define MMC_INT_EBE      (1u << 15)
++#define MMC_INT_ERR      (MMC_INT_RE | MMC_INT_RCRC | MMC_INT_DCRC | MMC_INT_RTO | MMC_INT_DRTO | MMC_INT_HTO | MMC_INT_HLE | MMC_INT_SBE | MMC_INT_EBE)
++
++struct a21s_map_hdr  { char magic[8]; uint32_t version, nfiles, nexts, crc; uint32_t pad[2]; };
++struct a21s_map_file { char name[16]; char part[16]; uint64_t size; uint32_t first_ext, n_ext; };
++struct a21s_map_ext  { uint64_t logical, phys, len; };
++
++static int a21s_mmc_rca = 1;
++static int a21s_mmc_wide64;
++static uint64_t a21s_boot_first, a21s_boot_last;
++static uint64_t a21s_userdata_first, a21s_userdata_last;
++static uint8_t a21s_mapbuf[A21S_MAP_BYTES] __attribute__((aligned(8)));
++static struct a21s_map_ext *a21s_sys_exts;
++static uint32_t a21s_sys_nexts;
++static uint64_t a21s_sys_bytes;
++
++static inline uint32_t a21s_mr(uint32_t o) {
++	uint32_t v = *(volatile uint32_t *)(su.regs + o);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++static inline void a21s_mw(uint32_t o, uint32_t v) {
++	__asm__ volatile ("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(su.regs + o) = v;
++}
++static uint64_t a21s_ms_now(void) {
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000000ULL;
++}
++static int a21s_mmc_wait_idle(uint32_t ms) {
++	uint64_t t = a21s_ms_now() + ms;
++	while (a21s_mr(MMC_STATUS) & ((1u << 9) | (1u << 10))) {
++		if (a21s_ms_now() > t) return -1;
++	}
++	return 0;
++}
++static int a21s_mmc_send_cmd(uint32_t cmd, uint32_t arg, uint32_t *resp) {
++	uint64_t t = a21s_ms_now() + 500;
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	a21s_mw(MMC_CMDARG, arg);
++	a21s_mw(MMC_CMD, cmd | MMC_CMD_START | MMC_CMD_HOLD);
++	while (a21s_mr(MMC_CMD) & MMC_CMD_START) {
++		if (a21s_ms_now() > t) return -2;
++	}
++	t = a21s_ms_now() + 500;
++	uint32_t s;
++	while (!((s = a21s_mr(MMC_RINTSTS)) & MMC_INT_CD)) {
++		if (a21s_ms_now() > t) return -3;
++	}
++	if (s & MMC_INT_RTO) { a21s_mw(MMC_RINTSTS, 0xffffffffu); return -4; }
++	if (s & (MMC_INT_RCRC | MMC_INT_RE)) { a21s_mw(MMC_RINTSTS, 0xffffffffu); return -5; }
++	if (resp) *resp = a21s_mr(MMC_RESP0);
++	a21s_mw(MMC_RINTSTS, MMC_INT_CD);
++	return 0;
++}
++static int a21s_mmc_init_hw(void) {
++	a21s_mmc_wide64 = (((a21s_mr(MMC_HCON) >> 7) & 7u) == 2u) ? 1 : 0;
++	a21s_mw(MMC_CTRL, a21s_mr(MMC_CTRL) & ~(1u << 25));
++	a21s_mw(MMC_BMOD, a21s_mr(MMC_BMOD) & ~(1u << 7));
++	(void)a21s_mmc_wait_idle(200);
++	a21s_mw(MMC_CTRL, a21s_mr(MMC_CTRL) | (1u << 1));
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & (1u << 1)); i++) {}
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	for (int r = 1; r <= 2; r++) {
++		uint32_t resp = 0;
++		int rc = a21s_mmc_send_cmd(13u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_WAITPRV, (uint32_t)r << 16, &resp);
++		printf("A21S EMMC: CMD13 rca=%d -> %d resp=%#x wide64=%d\n", r, rc, resp, a21s_mmc_wide64);
++		if (rc == 0) {
++			a21s_mmc_rca = r;
++			int st = (resp >> 9) & 15;
++			if (st != 4) {
++				uint32_t r7 = 0;
++				(void)a21s_mmc_send_cmd(7u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_WAITPRV, (uint32_t)r << 16, &r7);
++			}
++			return 0;
++		}
++	}
++	return EIO;
++}
++static int a21s_mmc_read_chunk(uint64_t lba, uint32_t n, uint8_t *buf) {
++	if (a21s_mmc_wait_idle(500)) return EIO;
++	a21s_mw(MMC_CTRL, a21s_mr(MMC_CTRL) | (1u << 1));
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & (1u << 1)); i++) {}
++	a21s_mw(MMC_BLKSIZ, 512);
++	a21s_mw(MMC_BYTCNT, n * 512);
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	uint32_t cmd = (n == 1)
++	    ? (17u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WAITPRV)
++	    : (18u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WAITPRV | MMC_CMD_AUTOSTOP);
++	uint64_t t = a21s_ms_now() + 1000;
++	a21s_mw(MMC_CMDARG, (uint32_t)lba);
++	a21s_mw(MMC_CMD, cmd | MMC_CMD_START | MMC_CMD_HOLD);
++	while (a21s_mr(MMC_CMD) & MMC_CMD_START) {
++		if (a21s_ms_now() > t) return EIO;
++	}
++	uint32_t left = n * 512;
++	uint32_t *p = (uint32_t *)(void *)buf;
++	uint64_t tick_budget = 0;
++	nanoseconds_to_absolutetime((uint64_t)(3000u + n) * NSEC_PER_MSEC, &tick_budget);
++	uint64_t deadline_ticks = mach_absolute_time() + tick_budget;
++	while (left) {
++		uint32_t fc = (*(volatile uint32_t *)(su.regs + MMC_STATUS) >> 17) & 0x1fffu;
++		if (!fc) {
++			uint32_t s = a21s_mr(MMC_RINTSTS);
++			if (s & MMC_INT_ERR) {
++				printf("A21S EMMC: rd err rintsts=%#x lba=%#llx n=%u\n", s, lba, n);
++				a21s_mw(MMC_RINTSTS, 0xffffffffu);
++				return EIO;
++			}
++			if (mach_absolute_time() > deadline_ticks) {
++				printf("A21S EMMC: rd FIFO stall rintsts=%#x left=%u\n", s, left);
++				return ETIMEDOUT;
++			}
++			continue;
++		}
++		if (a21s_mmc_wide64) {
++			volatile uint64_t *d = (volatile uint64_t *)(su.regs + MMC_DATA);
++			uint64_t *p64 = (uint64_t *)(void *)p;
++			while (fc >= 4 && left >= 32) {
++				p64[0] = *d;
++				p64[1] = *d;
++				p64[2] = *d;
++				p64[3] = *d;
++				p64 += 4;
++				fc -= 4;
++				left -= 32;
++			}
++			while (fc-- && left >= 8) {
++				*p64++ = *d;
++				left -= 8;
++			}
++			p = (uint32_t *)(void *)p64;
++		} else {
++			volatile uint32_t *d = (volatile uint32_t *)(su.regs + MMC_DATA);
++			while (fc-- && left >= 4) {
++				*p++ = *d;
++				left -= 4;
++			}
++		}
++	}
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	uint64_t t2 = a21s_ms_now() + 1000;
++	while (!(a21s_mr(MMC_RINTSTS) & MMC_INT_DTO) && a21s_ms_now() < t2) {}
++	if (n > 1) {
++		uint64_t t3 = a21s_ms_now() + 500;
++		while (!(a21s_mr(MMC_RINTSTS) & MMC_INT_ACD) && a21s_ms_now() < t3) {}
++	}
++	uint32_t s = a21s_mr(MMC_RINTSTS);
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	su.ncmds++;
++	su.last_lba = lba;
++	return (s & MMC_INT_ERR) ? EIO : 0;
++}
++static int a21s_idmac_ok;
++
++static int a21s_mmc_dma_read_chunk(uint64_t lba, uint32_t n, uint8_t *buf) {
++	uintptr_t bounce_va = (uintptr_t)(su.dma + DMA_BOUNCE);
++	uintptr_t bva = (uintptr_t)buf;
++	uint32_t total = n * 512u;
++	if (!su.dma || !su.dma_pa || bva < bounce_va || bva + total > bounce_va + BOUNCE_SIZE) {
++		return ENOTSUP;
++	}
++	if (((a21s_mr(MMC_HCON) >> 27) & 1u) == 0) {
++		return ENOTSUP;
++	}
++	uint64_t dst_pa = su.dma_pa + DMA_BOUNCE + (uint64_t)(bva - bounce_va);
++	uint64_t desc_pa = su.dma_pa + DMA_UTRL;
++	struct a21s_idmac_desc64 *desc = (struct a21s_idmac_desc64 *)(su.dma + DMA_UTRL);
++	uint32_t ndesc = (total + 4095u) / 4096u;
++	if (ndesc == 0 || ndesc * sizeof(*desc) > DMA_BOUNCE) {
++		return ENOTSUP;
++	}
++	if (a21s_mmc_wait_idle(500)) {
++		return EIO;
++	}
++	for (uint32_t i = 0, rem = total; i < ndesc; i++) {
++		uint32_t seg = rem > 4096u ? 4096u : rem;
++		uint64_t seg_pa = dst_pa + (uint64_t)i * 4096ULL;
++		uint64_t next_pa = (i + 1 < ndesc) ? (desc_pa + (uint64_t)(i + 1) * sizeof(*desc)) : 0ULL;
++		desc[i].des0 = (1u << 31) | (1u << 4) | (i == 0 ? (1u << 3) : 0u) |
++		    ((i + 1 == ndesc) ? (1u << 2) : (1u << 1));
++		desc[i].des1 = 0;
++		desc[i].des2 = seg;
++		desc[i].des3 = 0;
++		desc[i].des4 = (uint32_t)seg_pa;
++		desc[i].des5 = (uint32_t)(seg_pa >> 32);
++		desc[i].des6 = (uint32_t)next_pa;
++		desc[i].des7 = (uint32_t)(next_pa >> 32);
++		rem -= seg;
++	}
++	clean_dcache64((addr64_t)desc_pa, (uint32_t)(ndesc * sizeof(*desc)), TRUE);
++	flush_dcache64((addr64_t)dst_pa, total, TRUE);
++	__builtin_arm_dsb(0xf);
++
++	a21s_mw(MMC_CTRL, (a21s_mr(MMC_CTRL) & ~(1u << 4)) | (1u << 1) | (1u << 2));
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & ((1u << 1) | (1u << 2))); i++) {}
++	a21s_mw(MMC_BMOD, a21s_mr(MMC_BMOD) | 1u);
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_BMOD) & 1u); i++) {}
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	a21s_mw(MMC_IDSTS64, 0xffffffffu);
++	a21s_mw(MMC_IDINTEN64, 0x337u);
++	a21s_mw(MMC_DBADDRL, (uint32_t)desc_pa);
++	a21s_mw(MMC_DBADDRU, (uint32_t)(desc_pa >> 32));
++	a21s_mw(MMC_CTRL, (a21s_mr(MMC_CTRL) & ~(1u << 4)) | (1u << 25));
++	a21s_mw(MMC_BMOD, (a21s_mr(MMC_BMOD) & ~1u) | (1u << 7) | (1u << 1));
++	a21s_mw(MMC_BLKSIZ, 512);
++	a21s_mw(MMC_BYTCNT, total);
++
++	uint32_t cmd = (n == 1)
++	    ? (17u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WAITPRV)
++	    : (18u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WAITPRV | MMC_CMD_AUTOSTOP);
++	uint64_t t = a21s_ms_now() + 1000;
++	a21s_mw(MMC_CMDARG, (uint32_t)lba);
++	a21s_mw(MMC_CMD, cmd | MMC_CMD_START | MMC_CMD_HOLD);
++	a21s_mw(MMC_PLDMND, 1u);
++	int rc = 0;
++	while (a21s_mr(MMC_CMD) & MMC_CMD_START) {
++		if (a21s_ms_now() > t) {
++			rc = EIO;
++			goto out_dma;
++		}
++	}
++	{
++		uint64_t deadline = a21s_ms_now() + 3000 + n;
++		bool can_nap = (n >= 16) && su.ready && ml_get_interrupts_enabled() &&
++		    !ml_at_interrupt_context() && get_preemption_level() == 0;
++		for (;;) {
++			uint32_t s = a21s_mr(MMC_RINTSTS);
++			uint32_t idsts = a21s_mr(MMC_IDSTS64);
++			if ((s & MMC_INT_ERR) || (idsts & ((1u << 2) | (1u << 4) | (1u << 5)))) {
++				printf("A21S EMMC: dma err rint=%#x idsts=%#x lba=%#llx n=%u\n", s, idsts, lba, n);
++				rc = EIO;
++				goto out_dma;
++			}
++			if (s & MMC_INT_DTO) {
++				break;
++			}
++			if (a21s_ms_now() > deadline) {
++				printf("A21S EMMC: dma timeout rint=%#x idsts=%#x lba=%#llx n=%u\n", s, idsts, lba, n);
++				rc = ETIMEDOUT;
++				goto out_dma;
++			}
++			if (can_nap) {
++				delay(4);
++			}
++		}
++		if (n > 1) {
++			uint64_t t3 = a21s_ms_now() + 500;
++			while (!(a21s_mr(MMC_RINTSTS) & MMC_INT_ACD) && a21s_ms_now() < t3) {}
++		}
++	}
++	flush_dcache64((addr64_t)dst_pa, total, TRUE);
++	__builtin_arm_dsb(0xf);
++	su.ncmds++;
++	su.last_lba = lba;
++
++out_dma:
++	a21s_mw(MMC_BMOD, a21s_mr(MMC_BMOD) & ~(1u << 7));
++	a21s_mw(MMC_CTRL, (a21s_mr(MMC_CTRL) & ~(1u << 25)) | (1u << 1) | (1u << 2));
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & ((1u << 1) | (1u << 2))); i++) {}
++	a21s_mw(MMC_IDINTEN64, 0);
++	a21s_mw(MMC_IDSTS64, 0xffffffffu);
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	return rc;
++}
++
++static int a21s_mmc_read_sectors(uint64_t lba, uint32_t n, void *buf) {
++	uint8_t *b = (uint8_t *)buf;
++	while (n) {
++		uint32_t c = n > 2048u ? 2048u : n;
++		int err = 0;
++		if (a21s_idmac_ok) {
++			err = a21s_mmc_dma_read_chunk(lba, c, b);
++			if (!err) {
++				lba += c;
++				n -= c;
++				b += (size_t)c * 512u;
++				continue;
++			}
++			if (err != ENOTSUP) {
++				printf("A21S EMMC: IDMAC read fallback to PIO (err=%d lba=%#llx c=%u)\n", err, lba, c);
++				a21s_idmac_ok = 0;
++				(void)a21s_mmc_init_hw();
++			}
++		}
++		for (int tries = 0; tries < 3; tries++) {
++			err = a21s_mmc_read_chunk(lba, c, b);
++			if (!err) break;
++			delay(1000);
++		}
++		if (err) return err;
++		lba += c;
++		n -= c;
++		b += (size_t)c * 512u;
++	}
++	return 0;
++}
++static int a21s_mmc_write_chunk(uint64_t lba, uint32_t n, const uint8_t *buf) {
++	if (a21s_mmc_wait_idle(500)) return EIO;
++	a21s_mw(MMC_CTRL, a21s_mr(MMC_CTRL) | (1u << 1));
++	for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & (1u << 1)); i++) {}
++	a21s_mw(MMC_BLKSIZ, 512);
++	a21s_mw(MMC_BYTCNT, n * 512);
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	uint32_t cmd = (n == 1)
++	    ? (24u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WR | MMC_CMD_WAITPRV)
++	    : (25u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_DATA | MMC_CMD_WR | MMC_CMD_WAITPRV | MMC_CMD_AUTOSTOP);
++	uint64_t t = a21s_ms_now() + 1000;
++	a21s_mw(MMC_CMDARG, (uint32_t)lba);
++	a21s_mw(MMC_CMD, cmd | MMC_CMD_START | MMC_CMD_HOLD);
++	while (a21s_mr(MMC_CMD) & MMC_CMD_START) {
++		if (a21s_ms_now() > t) return EIO;
++	}
++	uint32_t left = n * 512;
++	const uint32_t *p = (const uint32_t *)(const void *)buf;
++	uint64_t deadline = a21s_ms_now() + 3000;
++	const uint32_t fifo_words = 64;
++	while (left) {
++		uint32_t s = a21s_mr(MMC_RINTSTS);
++		if (s & MMC_INT_ERR) {
++			printf("A21S EMMC: wr err rintsts=%#x lba=%#llx n=%u\n", s, lba, n);
++			a21s_mw(MMC_RINTSTS, 0xffffffffu);
++			return EIO;
++		}
++		uint32_t fc = (a21s_mr(MMC_STATUS) >> 17) & 0x1fffu;
++		uint32_t room = fifo_words > fc ? fifo_words - fc : 0;
++		if (!room) {
++			if (a21s_ms_now() > deadline) {
++				printf("A21S EMMC: wr FIFO stall lba=%#llx left=%u\n", lba, left);
++				return ETIMEDOUT;
++			}
++			continue;
++		}
++		deadline = a21s_ms_now() + 3000;
++		if (a21s_mmc_wide64) {
++			volatile uint64_t *d = (volatile uint64_t *)(su.regs + MMC_DATA);
++			while (room-- && left >= 8) {
++				*d = (uint64_t)p[0] | ((uint64_t)p[1] << 32);
++				p += 2;
++				left -= 8;
++			}
++		} else {
++			volatile uint32_t *d = (volatile uint32_t *)(su.regs + MMC_DATA);
++			while (room-- && left >= 4) {
++				*d = *p++;
++				left -= 4;
++			}
++		}
++	}
++	uint64_t t2 = a21s_ms_now() + 3000;
++	while (!(a21s_mr(MMC_RINTSTS) & MMC_INT_DTO)) {
++		if (a21s_ms_now() > t2) return ETIMEDOUT;
++	}
++	if (n > 1) {
++		uint64_t t3 = a21s_ms_now() + 500;
++		while (!(a21s_mr(MMC_RINTSTS) & MMC_INT_ACD) && a21s_ms_now() < t3) {}
++	}
++	a21s_mw(MMC_RINTSTS, 0xffffffffu);
++	for (int i = 0; i < 40000; i++) {
++		uint32_t r = 0;
++		if (a21s_mmc_send_cmd(13u | MMC_CMD_RESP | MMC_CMD_CRC | MMC_CMD_WAITPRV, (uint32_t)a21s_mmc_rca << 16, &r) == 0 &&
++		    (r & (1u << 8)) && ((r >> 9) & 15u) == 4u) {
++			su.ncmds++;
++			su.last_lba = lba;
++			return 0;
++		}
++		delay(25);
++	}
++	return ETIMEDOUT;
++}
++static int a21s_mmc_write_sectors(uint64_t lba, uint32_t n, const void *buf) {
++	const uint8_t *b = (const uint8_t *)buf;
++	while (n) {
++		uint32_t c = n > 128u ? 128u : n;
++		int err = a21s_mmc_write_chunk(lba, c, b);
++		if (err) return err;
++		lba += c;
++		n -= c;
++		b += (size_t)c * 512u;
++	}
++	return 0;
++}
++static uint32_t a21s_crc32(const uint8_t *p, size_t n) {
++	uint32_t c = 0xffffffffu;
++	while (n--) {
++		c ^= *p++;
++		for (int k = 0; k < 8; k++) {
++			c = (c >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(c & 1u));
++		}
++	}
++	return ~c;
++}
++static int a21s_load_extents(void) {
++	uint8_t *b = (uint8_t *)(su.dma + DMA_BOUNCE);
++	uint8_t pio_gpt[512];
++	if (a21s_mmc_read_sectors(1, 1, pio_gpt) != 0 || memcmp(pio_gpt, "EFI PART", 8) != 0) {
++		printf("A21S EMMC: bad GPT header\n");
++		return ENXIO;
++	}
++	memcpy(b, pio_gpt, 512);
++	uint32_t want_idmac = 0;
++	if (PE_parse_boot_argn("a21s_idmac", &want_idmac, sizeof(want_idmac)) && want_idmac != 0) {
++		memset(b, 0xa5, 512);
++		int drc = a21s_mmc_dma_read_chunk(1, 1, b);
++		if (drc == 0 && memcmp(b, pio_gpt, 512) == 0) {
++			a21s_idmac_ok = 1;
++			printf("A21S EMMC: 64-bit IDMAC DMA enabled at dma_pa=%#llx\n", su.dma_pa);
++		} else {
++			a21s_idmac_ok = 0;
++			(void)a21s_mmc_init_hw();
++			memcpy(b, pio_gpt, 512);
++		}
++	}
++	uint64_t elba = 0;
++	uint32_t nent = 0, esz = 0;
++	memcpy(&elba, b + 72, 8);
++	memcpy(&nent, b + 80, 4);
++	memcpy(&esz, b + 84, 4);
++	if (esz != 128 || nent == 0 || nent > 128) {
++		printf("A21S EMMC: bad GPT table %u x %u\n", nent, esz);
++		return ENXIO;
++	}
++	if (a21s_mmc_read_sectors(elba, (nent * esz + 511u) / 512u, b) != 0) {
++		return EIO;
++	}
++	for (uint32_t i = 0; i < nent; i++) {
++		const uint8_t *e = b + i * esz;
++		uint64_t first = 0, last = 0;
++		memcpy(&first, e + 32, 8);
++		memcpy(&last, e + 40, 8);
++		if (!first && !last) continue;
++		char nm[37];
++		unsigned c = 0;
++		for (; c < 36; c++) {
++			uint16_t ch = (uint16_t)(e[56 + 2 * c] | (e[57 + 2 * c] << 8));
++			if (!ch) break;
++			nm[c] = ch < 128 ? (char)ch : '?';
++		}
++		nm[c] = 0;
++		if (strcmp(nm, "boot") == 0) { a21s_boot_first = first; a21s_boot_last = last; }
++		else if (strcmp(nm, "userdata") == 0) { a21s_userdata_first = first; a21s_userdata_last = last; }
++	}
++	if (!a21s_boot_first || !a21s_userdata_first) {
++		printf("A21S EMMC: missing boot (%#llx) or userdata (%#llx) GPT\n", a21s_boot_first, a21s_userdata_first);
++		return ENOENT;
++	}
++	uint64_t map_lba = a21s_boot_first + (A21S_BOOT_PART_BYTES - A21S_MAP_BYTES) / 512u;
++	if (a21s_mmc_read_sectors(map_lba, A21S_MAP_BYTES / 512u, a21s_mapbuf) != 0) {
++		printf("A21S EMMC: failed to read extent map at LBA %#llx\n", map_lba);
++		return EIO;
++	}
++	struct a21s_map_hdr *mh = (struct a21s_map_hdr *)(void *)a21s_mapbuf;
++	if (memcmp(mh->magic, "A21SIOS1", 8) != 0) {
++		printf("A21S EMMC: invalid A21SIOS1 magic\n");
++		return ENOENT;
++	}
++	uint32_t want_crc = mh->crc;
++	mh->crc = 0;
++	uint32_t got_crc = a21s_crc32(a21s_mapbuf, A21S_MAP_BYTES);
++	mh->crc = want_crc;
++	if (got_crc != want_crc) {
++		printf("A21S EMMC: extent map CRC mismatch %#x != %#x\n", got_crc, want_crc);
++		return EIO;
++	}
++	struct a21s_map_file *mf = (struct a21s_map_file *)(void *)(a21s_mapbuf + sizeof(*mh));
++	struct a21s_map_ext *me = (struct a21s_map_ext *)(void *)(a21s_mapbuf + sizeof(*mh) + 8 * sizeof(*mf));
++	for (uint32_t i = 0; i < mh->nfiles && i < 8; i++) {
++		if (strcmp(mf[i].name, "system") == 0) {
++			if (strcmp(mf[i].part, "userdata") != 0 || mf[i].n_ext == 0 ||
++			    mf[i].first_ext + mf[i].n_ext > mh->nexts) {
++				return EINVAL;
++			}
++			a21s_sys_exts = &me[mf[i].first_ext];
++			a21s_sys_nexts = mf[i].n_ext;
++			a21s_sys_bytes = mf[i].size;
++			/* Verify every extent lies strictly within userdata GPT bounds and is 512B aligned. */
++			uint64_t part_bytes = (a21s_userdata_last - a21s_userdata_first + 1ULL) * 512ULL;
++			for (uint32_t k = 0; k < a21s_sys_nexts; k++) {
++				if ((a21s_sys_exts[k].logical & 511ULL) || (a21s_sys_exts[k].phys & 511ULL) ||
++				    (a21s_sys_exts[k].len & 511ULL) || a21s_sys_exts[k].len == 0 ||
++				    a21s_sys_exts[k].phys > part_bytes ||
++				    a21s_sys_exts[k].len > part_bytes - a21s_sys_exts[k].phys) {
++					printf("A21S EMMC: bad extent %u!\n", k);
++					return EINVAL;
++				}
++			}
++			printf("A21S EMMC: mapped /data/ios/system: %llu MiB across %u extents on userdata (LBA %#llx)\n",
++			    a21s_sys_bytes >> 20, a21s_sys_nexts, a21s_userdata_first);
++			return 0;
++		}
++	}
++	printf("A21S EMMC: 'system' entry not found in A21SIOS1 map\n");
++	return ENOENT;
++}
++static int a21s_sys_io(uint64_t off, uint64_t len, uint8_t *buf, bool write) {
++	while (len > 0) {
++		const struct a21s_map_ext *e = NULL;
++		/* Binary/linear search extent covering logical byte offset `off`. */
++		uint32_t lo = 0, hi = a21s_sys_nexts;
++		while (lo < hi) {
++			uint32_t mid = lo + (hi - lo) / 2;
++			if (off < a21s_sys_exts[mid].logical) {
++				hi = mid;
++			} else if (off >= a21s_sys_exts[mid].logical + a21s_sys_exts[mid].len) {
++				lo = mid + 1;
++			} else {
++				e = &a21s_sys_exts[mid];
++				break;
++			}
++		}
++		if (!e) {
++			for (uint32_t i = 0; i < a21s_sys_nexts; i++) {
++				if (off >= a21s_sys_exts[i].logical && off < a21s_sys_exts[i].logical + a21s_sys_exts[i].len) {
++					e = &a21s_sys_exts[i];
++					break;
++				}
++			}
++		}
++		if (!e) {
++			printf("A21S EMMC: logical offset %#llx unmapped!\n", off);
++			return EIO;
++		}
++		uint64_t within = off - e->logical;
++		uint64_t chunk = MIN(len, e->len - within);
++		uint64_t disk_lba = a21s_userdata_first + (e->phys + within) / 512ULL;
++		uint32_t secs = (uint32_t)(chunk / 512ULL);
++		if (disk_lba < a21s_userdata_first || disk_lba + secs - 1ULL > a21s_userdata_last) {
++			printf("A21S EMMC: refusing out-of-userdata LBA %#llx+%u\n", disk_lba, secs);
++			return EPERM;
++		}
++		int err = write ? a21s_mmc_write_sectors(disk_lba, secs, buf)
++		                : a21s_mmc_read_sectors(disk_lba, secs, buf);
++		if (err) return err;
++		off += chunk;
++		len -= chunk;
++		buf += chunk;
++	}
++	return 0;
++}
++
+ static int
+ ufs_read_blocks(uint64_t lba, uint32_t count)
+ {
+-	if (lba > UINT32_MAX || count > BOUNCE_SIZE / UFS_BLOCK) {
+-		return EINVAL;
+-	}
+-#if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	if (lba + count - 1 > UINT32_MAX) {
++	if (count == 0 || count > BOUNCE_SIZE / UFS_BLOCK || !su.nblocks ||
++	    lba < su.first_block || lba - su.first_block >= su.nblocks ||
++	    count > su.nblocks - (lba - su.first_block)) {
+ 		return EINVAL;
+ 	}
+-	int error = 0;
+-	uint32_t per = su.prdt_stride ? STARLTE_MULTI : 1u;
+-	for (uint32_t i = 0; i < count && !error; i += per) {
+-		uint64_t b = lba + i;
+-		uint32_t n = MIN(per, count - i);
+-		uint8_t cdb[10] = {
+-			0x28, 0,
+-			(uint8_t)(b >> 24), (uint8_t)(b >> 16), (uint8_t)(b >> 8), (uint8_t)b,
+-			0, (uint8_t)(n >> 8), (uint8_t)n, 0
+-		};
+-		su.bounce_off = i * UFS_BLOCK;
+-		error = ufs_scsi(cdb, sizeof(cdb), n * UFS_BLOCK, false);
+-	}
+-	su.bounce_off = 0;
+-	return error;
+-#else
+-	uint8_t cdb[10] = {
+-		0x28, 0,
+-		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+-		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+-	};
+-	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
+-#endif
++	return a21s_sys_io((lba - su.first_block) * UFS_BLOCK, (uint64_t)count * UFS_BLOCK,
++	    (uint8_t *)(su.dma + DMA_BOUNCE), false);
+ }
+ 
+-/*
+- * WRITE(10) of count device blocks from the bounce buffer to lba. The range
+- * must lie inside the partition: this is the only place data goes out.
+- */
+ static int
+ ufs_write_blocks(uint64_t lba, uint32_t count)
+ {
+ 	if (!su.writable || !su.nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
+ 	    lba < su.first_block || lba - su.first_block >= su.nblocks ||
+-	    count > su.nblocks - (lba - su.first_block) || lba + count - 1 > UINT32_MAX) {
+-		printf("HEROLTE UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
++	    count > su.nblocks - (lba - su.first_block)) {
++		printf("A21S EMMC: refusing write of %u blocks at 0x%llx\n", count, lba);
+ 		return EPERM;
+ 	}
+-#if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	int error = 0;
+-	uint32_t per = su.prdt_stride ? STARLTE_MULTI : 1u;
+-	for (uint32_t i = 0; i < count && !error; i += per) {
+-		uint64_t b = lba + i;
+-		uint32_t n = MIN(per, count - i);
+-		uint8_t cdb[10] = {
+-			0x2a, 0,
+-			(uint8_t)(b >> 24), (uint8_t)(b >> 16), (uint8_t)(b >> 8), (uint8_t)b,
+-			0, (uint8_t)(n >> 8), (uint8_t)n, 0
+-		};
+-		su.bounce_off = i * UFS_BLOCK;
+-		error = ufs_scsi(cdb, sizeof(cdb), n * UFS_BLOCK, true);
+-	}
+-	su.bounce_off = 0;
+-	return error;
+-#else
+-	uint8_t cdb[10] = {
+-		0x2a, 0,
+-		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
+-		0, (uint8_t)(count >> 8), (uint8_t)count, 0
+-	};
+-	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
+-#endif
++	return a21s_sys_io((lba - su.first_block) * UFS_BLOCK, (uint64_t)count * UFS_BLOCK,
++	    (uint8_t *)(su.dma + DMA_BOUNCE), true);
+ }
+ 
+ static int
+ ufs_sync_cache(void)
+ {
+-	static const uint8_t cdb[10] = { 0x35 };       /* SYNCHRONIZE CACHE(10), whole LUN */
+-	return ufs_scsi(cdb, sizeof(cdb), 0, false);
++	return 0;
+ }
+ 
+ static int
+@@ -1070,10 +1611,91 @@ starlte_dump_file(void)
+  * which TWRP shows as /sys/fs/pstore/pmsg-ramoops-0, then the reset. Both
+  * mappings are made at boot: nothing may be mapped inside a panic.
+  */
++void a21s_fix_var_owners(void);
++void
++a21s_fix_var_owners(void)
++{
++	static int done = 0;
++	if (!os_atomic_cmpxchg(&done, 0, 1, relaxed)) {
++		return;
++	}
++	static const struct {
++		const char *path;
++		uid_t uid;
++		gid_t gid;
++		mode_t mode;
++	} dirs[] = {
++		{ "/private/var/Keychains", 64, 501, 0775 },
++		{ "/private/var/protected/trustd", 282, 0, 0755 },
++		{ "/private/var/Managed Preferences/mobile", 501, 501, 0755 },
++		{ "/private/var/buddy", 501, 501, 0700 },
++		{ "/private/var/datamigrator", 501, 501, 0755 },
++		{ "/private/var/dextcores", 270, 270, 0755 },
++		{ "/private/var/installd", 33, 33, 0755 },
++		{ "/private/var/networkd", 24, 24, 0755 },
++		{ "/private/var/wireless", 25, 25, 0755 },
++		{ "/private/var/OOPJit", 0, 80, 0777 },
++		{ "/private/var/run", 0, 1, 0775 },
++		{ "/private/var/log/mDNSResponder", 65, 0, 0755 },
++		{ "/private/var/logs/WindowServer", 501, 501, 0755 },
++		{ "/private/var/logs/hidfw-crashlogs", 501, 501, 0755 },
++		{ "/private/var/logs/mediaserverd", 501, 501, 0755 },
++		{ "/private/var/preferences/Logging", 272, 272, 0755 },
++		{ "/private/var/db/ConnectivityPowerTableUpdates", 501, 501, 0755 },
++		{ "/private/var/db/UpdateMetrics", 501, 501, 0777 },
++		{ "/private/var/db/accessoryupdater", 278, 278, 0751 },
++		{ "/private/var/db/analyticsd", 263, 263, 0750 },
++		{ "/private/var/db/aonsensed", 300, 300, 0755 },
++		{ "/private/var/db/astris", 245, 245, 0755 },
++		{ "/private/var/db/biome", 501, 501, 0751 },
++		{ "/private/var/db/com.apple.devicemanagementclient", 501, 501, 0755 },
++		{ "/private/var/db/com.apple.findmy.findmybeaconingd", 501, 501, 0755 },
++		{ "/private/var/db/com.apple.naturallanguaged", 304, 304, 0755 },
++		{ "/private/var/db/coreml", 280, 280, 0750 },
++		{ "/private/var/db/darwindaemon", 284, 284, 0750 },
++		{ "/private/var/db/datadetectors", 257, 257, 0711 },
++		{ "/private/var/db/diagnostics", 272, 272, 0751 },
++		{ "/private/var/db/diskimagesiod", 271, 271, 0750 },
++		{ "/private/var/db/eligibilityd", 297, 297, 0755 },
++		{ "/private/var/db/findmydevice", 254, 254, 0755 },
++		{ "/private/var/db/fpsd", 501, 501, 0750 },
++		{ "/private/var/db/gpsd", 267, 267, 0700 },
++		{ "/private/var/db/knowledgegraphd", 279, 279, 0750 },
++		{ "/private/var/db/lockdown", 213, 213, 0700 },
++		{ "/private/var/db/lsd", 501, 501, 0755 },
++		{ "/private/var/db/mmaintenanced", 283, 283, 0750 },
++		{ "/private/var/db/modelmanagerd", 301, 301, 0700 },
++		{ "/private/var/db/nearbyd", 501, 501, 0750 },
++		{ "/private/var/db/os_eligibility", 297, 297, 0755 },
++		{ "/private/var/db/reportmemoryexception", 269, 269, 0750 },
++		{ "/private/var/db/rmd", 277, 277, 0750 },
++		{ "/private/var/db/swtransparencyd", 303, 303, 0755 },
++		{ "/private/var/db/timed", 266, 266, 0750 },
++	};
++	vfs_context_t ctx = vfs_context_kernel();
++	unsigned fixed = 0;
++	for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
++		vnode_t vp = NULLVP;
++		if (vnode_open(dirs[i].path, 0, 0, VNODE_LOOKUP_NOFOLLOW, &vp, ctx) == 0) {
++			struct vnode_attr va;
++			VATTR_INIT(&va);
++			VATTR_SET(&va, va_uid, dirs[i].uid);
++			VATTR_SET(&va, va_gid, dirs[i].gid);
++			VATTR_SET(&va, va_mode, dirs[i].mode);
++			if (vnode_setattr(vp, &va, ctx) == 0) {
++				fixed++;
++			}
++			(void)vnode_close(vp, 0, ctx);
++		}
++	}
++	printf("A21S VAR FIX: updated owners/modes on %u/%zu /private/var directories\n",
++	    fixed, sizeof(dirs) / sizeof(dirs[0]));
++}
++
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-#define STARLTE_PMU_PA          0x14060000
+-#define STARLTE_PMSG_PA         0xFED14000
+-#define STARLTE_PMSG_DATA       0x3F00u         /* the loader's cap, clear of the UEFI latches */
++#define STARLTE_PMU_PA          0x11860000
++#define STARLTE_PMSG_PA         0xf0f14000
++#define STARLTE_PMSG_DATA       0x3F00u         /* Exynos 850 log_pstore pmsg 0xf0f14000 (16 KiB) */
+ static volatile uint32_t *starlte_pmu_va;
+ static volatile uint8_t *starlte_pmsg_va;
+ extern void (*sweet_panic_hook)(void);
+@@ -1081,24 +1703,138 @@ extern char *debug_buf_base;
+ extern char *debug_buf_ptr;
+ 
+ static void
+-starlte_reset_to_recovery(void)
++a21s_psci_system_reset(void)
++{
++	for (volatile int i = 0; i < 5000000; i++) {
++		__asm__ volatile ("nop");
++	}
++	register uint64_t x0 __asm__("x0") = 0x84000009ULL;
++	__asm__ volatile ("smc #0" : "+r"(x0) :: "x1", "x2", "x3", "memory");
++}
++
++static uint8_t a21s_ld_gpt[16384] __attribute__((aligned(64)));
++static uint8_t a21s_ld_stage[65536] __attribute__((aligned(64)));
++void a21s_logdump_sync(const char *tag);
++
++void
++a21s_logdump_sync(const char *tag)
+ {
+-	volatile uint32_t *pmu = starlte_pmu_va;
+-	if (pmu == NULL) {
++	bool locked = false;
++	if (!panic_active() && !ml_at_interrupt_context() && ml_get_interrupts_enabled() && get_preemption_level() == 0) {
++		lck_mtx_lock(&herolte_ufs_lock);
++		locked = true;
++	} else if (!lck_mtx_try_lock(&herolte_ufs_lock)) {
++		if (!panic_active()) {
++			return;
++		}
++	} else {
++		locked = true;
++	}
++
++	if (!su.regs && !panic_active()) {
++		su.regs = ml_io_map(A21S_MMC_PA, A21S_MMC_MAP);
++	}
++	if (!su.regs) {
++		if (locked) lck_mtx_unlock(&herolte_ufs_lock);
+ 		return;
+ 	}
++	if (panic_active()) {
++		uint32_t r12 = 0;
++		a21s_idmac_ok = 0;
++		a21s_mw(MMC_BMOD, a21s_mr(MMC_BMOD) & ~(1u << 7));
++		a21s_mw(MMC_CTRL, (a21s_mr(MMC_CTRL) & ~(1u << 25)) | 0x6u);
++		for (int i = 0; i < 100000 && (a21s_mr(MMC_CTRL) & 0x6u); i++) {}
++		(void)a21s_mmc_send_cmd(12u | MMC_CMD_RESP | MMC_CMD_CRC | (1u << 14), 0, &r12);
++		(void)a21s_mmc_init_hw();
++	}
++	if (a21s_boot_first == 0) {
++		if (a21s_mmc_init_hw() == 0 &&
++		    a21s_mmc_read_sectors(1, 1, a21s_ld_gpt) == 0 &&
++		    memcmp(a21s_ld_gpt, "EFI PART", 8) == 0) {
++			uint64_t elba = 0;
++			uint32_t nent = 0, esz = 0;
++			memcpy(&elba, a21s_ld_gpt + 72, 8);
++			memcpy(&nent, a21s_ld_gpt + 80, 4);
++			memcpy(&esz, a21s_ld_gpt + 84, 4);
++			if (esz == 128 && nent > 0 && nent <= 128 &&
++			    a21s_mmc_read_sectors(elba, (nent * esz + 511u) / 512u, a21s_ld_gpt) == 0) {
++				for (uint32_t i = 0; i < nent; i++) {
++					const uint8_t *e = a21s_ld_gpt + i * esz;
++					uint64_t first = 0, last = 0;
++					memcpy(&first, e + 32, 8);
++					memcpy(&last, e + 40, 8);
++					if (!first && !last) continue;
++					if (e[56] == 'b' && e[57] == 0 && e[58] == 'o' && e[59] == 0 &&
++					    e[60] == 'o' && e[61] == 0 && e[62] == 't' && e[63] == 0 && e[64] == 0 && e[65] == 0) {
++						a21s_boot_first = first;
++						a21s_boot_last = last;
++						break;
++					}
++				}
++			}
++		}
++	}
++	if (a21s_boot_first != 0) {
++		const char *ring = NULL;
++		uint32_t rsize = 0;
++		uint64_t total = 0;
++		a5xelte_log_snapshot(&ring, &rsize, &total);
++		const char *pb = debug_buf_base, *pe = debug_buf_ptr;
++		uint32_t plen = (pb != NULL && pe > pb) ? (uint32_t)MIN((size_t)(pe - pb), 16384u) : 0;
++
++		memset(a21s_ld_stage, 0, 512);
++		memcpy(a21s_ld_stage, "XNU27LOG", 8);
++		memcpy(a21s_ld_stage + 8, &total, 8);
++		uint64_t plen64 = plen;
++		memcpy(a21s_ld_stage + 16, &plen64, 8);
++		if (tag) {
++			strlcpy((char *)(a21s_ld_stage + 24), tag, 56);
++		}
++		uint64_t dst_lba = a21s_boot_first + 71568UL;
++		(void)a21s_mmc_write_sectors(dst_lba, 1, a21s_ld_stage);
++		dst_lba += 1;
++
++		if (plen > 0) {
++			uint32_t paligned = (plen + 511u) & ~511u;
++			memset(a21s_ld_stage, 0, paligned);
++			memcpy(a21s_ld_stage, pb, plen);
++			(void)a21s_mmc_write_sectors(dst_lba, paligned / 512u, a21s_ld_stage);
++			dst_lba += paligned / 512u;
++		}
++
++		uint64_t max_bytes = MIN(total, MIN((uint64_t)rsize, (uint64_t)(1800u * 512u)));
++		uint64_t pos = total - max_bytes;
++		while (pos < total) {
++			uint32_t chunk = (uint32_t)MIN(total - pos, (uint64_t)sizeof(a21s_ld_stage));
++			uint32_t caligned = (chunk + 511u) & ~511u;
++			memset(a21s_ld_stage, 0, caligned);
++			for (uint32_t k = 0; k < chunk; k++) {
++				a21s_ld_stage[k] = (uint8_t)ring[(pos + k) % rsize];
++			}
++			if (a21s_mmc_write_sectors(dst_lba, caligned / 512u, a21s_ld_stage) != 0) {
++				break;
++			}
++			dst_lba += caligned / 512u;
++			pos += chunk;
++		}
++	}
++
++	if (locked) {
++		lck_mtx_unlock(&herolte_ufs_lock);
++	}
++}
++
++static void
++starlte_reset_to_recovery(void)
++{
+ 	(void)ml_set_interrupts_enabled(FALSE);
+-	pmu[0x808 / 4] = 0x12345678U;
+-	pmu[0x80c / 4] = 0x12345674U;
+-	__asm__ volatile ("dsb sy" ::: "memory");
+-	pmu[0x400 / 4] = 1;
+-	__asm__ volatile ("dsb sy" ::: "memory");
++	a21s_psci_system_reset();
+ 	for (;;) {
+ 		__asm__ volatile ("wfe");
+ 	}
+ }
+ 
+-static void
++static void __unused
+ starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
+ {
+ 	while (n-- > 0 && *o < STARLTE_PMSG_DATA) {
+@@ -1114,39 +1850,16 @@ starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
+ static void
+ starlte_panic_to_recovery(void)
+ {
+-	static const char hdr[] = "STARBITE: XNU panic (sweetreboot), panic log head:\n";
+-	static const char mid[] = "\n--- console before the panic:\n";
+-	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+-	volatile uint8_t *d;
+-	const char *b = debug_buf_base, *e = debug_buf_ptr;
+-	const char *ring;
+-	uint32_t rsize, o = 0;
+-	uint64_t total;
+-
+-	if (h != NULL) {
+-		d = starlte_pmsg_va + 12;
+-		starlte_pmsg_put(d, &o, hdr, sizeof(hdr) - 1);
+-		if (b != NULL && e > b) {
+-			starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+-		}
+-		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
+-		a5xelte_log_snapshot(&ring, &rsize, &total);
+-		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+-		for (uint64_t k = total - n; k < total; k++) {
+-			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
+-		}
+-		h[0] = 0x43474244U;                     /* "DBGC" */
+-		h[1] = o % STARLTE_PMSG_DATA;
+-		h[2] = o;
+-		__asm__ volatile ("dsb sy" ::: "memory");
+-	}
++	/* A21s: skip S9 STARLTE_PMSG_PA (0xf0f14000) which overlaps Exynos 850 debug-snapshot;
++	 * flush XNU27LOG("PANIC") directly to boot partition sectors 71568.. then PSCI reset to Android. */
++	a21s_logdump_sync("PANIC");
+ 	starlte_reset_to_recovery();
+ }
+ 
+ static void
+ starlte_reboot_setup(void)
+ {
+-	starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++	starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, 0x4000);
+ 	starlte_pmsg_va = (volatile uint8_t *)ml_io_map(STARLTE_PMSG_PA, 0x4000);
+ 	if (starlte_pmu_va != NULL && starlte_pmsg_va != NULL) {
+ 		sweet_panic_hook = starlte_panic_to_recovery;
+@@ -1155,19 +1868,7 @@ starlte_reboot_setup(void)
+ 	    starlte_pmu_va, starlte_pmsg_va);
+ }
+ 
+-/* Armed as soon as kmem works, so early panics reach TWRP too. */
+-/*
+- * Boot-arg sweethalt=1: restart and power off from iOS (the power menu's slider, Settings > General > Shut Down, a
+- * restart asked by any daemon). Without it this tree has no PE_halt_restart, so halt_all_cpus() printed "MACH Reboot" or
+- * "CPU halted" and spun: the panel kept its last frame and the phone looked hung until someone held the keys.
+- *   restart (kPERestartCPU; never during a panic, which keeps sweetreboot's way to recovery): INFORM2 = 0x12345678, INFORM3 = 0x12345670 (Samsung's reset reason
+- *     "unknown" = a plain restart: S-Boot boots BOOT, i.e. iOS again; 0x12345674 would be recovery), SWRESET.
+- *   power off (kPEHaltCPU, kPEUPSDelayHaltCPU): PS_HOLD low (PMU PS_HOLD_CONTROL 0x330C bit 8, as Samsung's kernel ends a
+- *     power-off). A charger or a held power key keeps the PMIC up; if the phone still runs a second later it restarts
+- *     as above instead (Samsung goes to its charging screen there).
+- * Off by default. Lines "STARLTE HALT: ...".
+- */
+-#define STARLTE_PS_HOLD_PAGE    0x14063000
++#define STARLTE_PS_HOLD_PAGE    0x11860000
+ #define STARLTE_PS_HOLD_OFF     0x30C
+ static volatile uint32_t *starlte_halt_pmu_va, *starlte_halt_ps_hold_page;
+ 
+@@ -1175,13 +1876,13 @@ __attribute__((noreturn))
+ static void
+ starlte_reset_normal(void)
+ {
+-	volatile uint32_t *pmu = starlte_halt_pmu_va;
++	volatile uint32_t *pmu = starlte_halt_pmu_va ? starlte_halt_pmu_va : starlte_pmu_va;
+ 	(void)ml_set_interrupts_enabled(FALSE);
+-	pmu[0x808 / 4] = 0x12345678U;
+-	pmu[0x80c / 4] = 0x12345670U;
+-	__asm__ volatile ("dsb sy" ::: "memory");
+-	pmu[0x400 / 4] = 1;
+-	__asm__ volatile ("dsb sy" ::: "memory");
++	if (pmu != NULL) {
++		pmu[0x3a00 / 4] = 2;
++		__asm__ volatile ("dsb sy; isb" ::: "memory");
++	}
++	a21s_psci_system_reset();
+ 	for (;;) {
+ 		__asm__ volatile ("wfe");
+ 	}
+@@ -1232,7 +1933,7 @@ starlte_halt_setup(void)
+ 	if (!PE_parse_boot_argn("sweethalt", &on, sizeof(on)) || on == 0) {
+ 		return;
+ 	}
+-	starlte_halt_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++	starlte_halt_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, 0x4000);
+ 	starlte_halt_ps_hold_page = (volatile uint32_t *)ml_io_map(STARLTE_PS_HOLD_PAGE, PAGE_SIZE);
+ 	if (starlte_halt_pmu_va != NULL && starlte_halt_ps_hold_page != NULL) {
+ 		PE_halt_restart = starlte_halt_restart;
+@@ -1282,22 +1983,13 @@ starlte_reboot_early(void)
+ 	if (PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs)) && secs != 0) {
+ 		starlte_reboot_setup();
+ 	} else {
+-		/* The USB console's "return" resets through the PMU too (starlte_reboot_recovery): mapped here, at boot, with
+-		 * or without sweetreboot, so that a command line without it still has its way out (9 Nov: a test cmdline
+-		 * without sweetreboot left "return" printing "PMU mapping failed" in a loop). Nothing is written until asked. */
+-		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
++		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, 0x4000);
+ 	}
+ 	starlte_halt_setup();
++	a21s_logdump_sync("KMEM");
+ }
+ STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
+ 
+-/*
+- * sweetreboot=N with no UFS log (rd=sdroot0, rd=md0, a read-only UFS root):
+- * herolte_log_start() never starts the log thread there, so its N-second reset
+- * never came and a hang needed the buttons (macOS t0 boot, 2026-11-03). This
+- * thread does it N seconds after boot unless the UFS log thread took over:
+- * the console tail goes to the ramoops pmsg ring, then the reset into TWRP.
+- */
+ static void
+ starlte_reboot_timer_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+@@ -1306,22 +1998,12 @@ starlte_reboot_timer_thread(__unused void *arg, __unused wait_result_t wr)
+ 	PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs));
+ 	(void)tsleep(&chan, PZERO, "sweetreboot", (int)(secs * hz));
+ 	if (herolte_log_started) {
+-		/* herolte_log_thread flushes and resets itself; iOS 27 on STARLTE: if it
+-		 * is stuck (UFS write hung, or it stopped on a write error), reset anyway
+-		 * 60 s later with the console tail in pmsg. */
+ 		(void)tsleep(&chan, PZERO, "sweetreboot", (int)(60 * hz));
+ 	}
+ 	printf("HEROLTE LOG: sweetreboot=%u reached, log thread %s: console tail to pmsg, reset to recovery\n",
+ 	    secs, herolte_log_started ? "did not reset in 60 s" : "never started");
+-	{
+-		/* sdlog=1: the whole kernel log ring to the card's test range too (starlte_sd.c) */
+-		extern struct msgbuf *msgbufp;
+-		extern int starlte_sd_dump_log(const void *, uint32_t, uint32_t);
+-		int lr = starlte_sd_dump_log(msgbufp->msg_bufc, (uint32_t)msgbufp->msg_size, (uint32_t)msgbufp->msg_bufx);
+-		printf("HEROLTE LOG: kernel log to card: %d\n", lr);
+-	}
+ 	starlte_dump_file();
+-	starlte_panic_to_recovery();    /* no panic log: header + console tail */
++	starlte_panic_to_recovery();    /* flushes pmsg + a21s_logdump_sync + reset */
+ }
+ 
+ static void
+@@ -1334,6 +2016,7 @@ starlte_reboot_timer(void)
+ 		thread_deallocate(th);
+ 		printf("HEROLTE LOG: sweetreboot timer %u s armed (independent of the UFS log)\n", secs);
+ 	}
++	a21s_logdump_sync("EARLY_BOOT");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_reboot_timer);
+ 
+@@ -1393,6 +2076,7 @@ starlte_wdog_fire(void)
+ 		h[2] = o;
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+ 	}
++	a21s_logdump_sync("WDOG");
+ 	starlte_reset_to_recovery();
+ }
+ 
+@@ -1543,14 +2227,9 @@ starlte_reboot_recovery(void)
+ {
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ 	if (starlte_pmu_va == NULL) {
+-		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);   /* last try */
+-	}
+-	/* the front camera's sensor, lens and supplies off again, if a stream had them on (nothing without cam_s9=) */
+-	extern void hakios_exynos_camera_quiesce(void);
+-	hakios_exynos_camera_quiesce();
+-	/* the modem back in reset, if cp=3 or 4 started it (nothing without cp=) */
+-	extern void hakios_shannon_quiesce(void);
+-	hakios_shannon_quiesce();
++		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, 0x4000);   /* last try */
++	}
++	a21s_logdump_sync("REBOOT");
+ 	starlte_reset_to_recovery();
+ 	printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
+ #else
+@@ -1591,6 +2270,7 @@ herolte_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 	if (reboot_s != 0 && starlte_pmu_va == NULL) {
+ 		starlte_reboot_setup();
+ 	}
++	a21s_logdump_sync("HEROLOG_START");
+ #endif
+ 	for (;;) {
+ 		(void)tsleep(&herolte_log_chan, PZERO, "herolog", hz * 10);
+@@ -1602,9 +2282,17 @@ herolte_log_thread(__unused void *arg, __unused wait_result_t wr)
+ 			printf("HEROLTE LOG: sweetreboot=%u reached, flushing and rebooting to recovery\n", reboot_s);
+ 			starlte_dump_file();
+ 			(void)herolte_log_write();
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++			a21s_logdump_sync("SWEETREBOOT_DONE");
++#endif
+ 			starlte_reboot_recovery();
+ 		}
+ 		int error = herolte_log_write();
++#if defined(ARM64_BOARD_CONFIG_STARLTE)
++		if (reboot_s != 0) {
++			a21s_logdump_sync("HEROLOG_TICK");
++		}
++#endif
+ 		if (error) {
+ 			printf("HEROLTE LOG: write failed (%d), stopping\n", error);
+ 			herolte_log_first = 0;
+@@ -1621,8 +2309,8 @@ starlte_ufs_heartbeat(__unused void *arg, __unused wait_result_t wr)
+ 	static int chan;
+ 	for (int i = 0; i < 40; i++) {
+ 		(void)tsleep(&chan, PZERO, "ufshb", 15 * hz);
+-		printf("HEROLTE UFS: hb %d: %llu cmds, last lba 0x%llx, busy 0x%x, dbr 0x%x\n",
+-		    i, su.ncmds, su.last_lba, su.busy, ufs_rd(REG_UTRLDBR));
++		printf("A21S EMMC: hb %d: %llu cmds, last lba 0x%llx, status 0x%x\n",
++		    i, su.ncmds, su.last_lba, a21s_mr(MMC_STATUS));
+ 		extern void starlte_brand_banner(bool full);
+ 		starlte_brand_banner(false);
+ 	}
+@@ -1638,6 +2326,10 @@ herolte_log_start(void)
+ 	if (kernel_thread_start(starlte_ufs_heartbeat, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++	/* Always arm panic hook (pmsg + XNU27LOG("PANIC") flush) even when herolog=0. */
++	if (starlte_pmu_va == NULL) {
++		starlte_reboot_setup();
++	}
+ 	if (!su.writable) {
+ 		/* Read-only root: no flash log, but sample the processes named
+ 		 * in boot-arg sweetsample (bsd/dev/sweet_sample.c). */
+@@ -1725,69 +2417,36 @@ restore:
+ static int
+ herolte_ufs_init(void)
+ {
+-	DTEntry node;
+-	uintptr_t const *reg = NULL;
+-	unsigned int size = 0;
+-	char want[64] = "USERDATA";
+-	int error;
+-
+-	if (SecureDTLookupEntry(NULL, "/herolte-ufs", &node) != kSuccess ||
+-	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+-	    size < 2 * sizeof(uintptr_t)) {
+-		printf("HEROLTE UFS: no /herolte-ufs node in the device tree\n");
+-		return ENXIO;
+-	}
+-	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+ 	uint32_t rw = 0;
+ 	PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+-	uint32_t cache = 0, wait = 0;
+-	PE_parse_boot_argn("ufscache", &cache, sizeof(cache));
+-	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
+-	su.cache = (cache == 1);
+-	su.wait = (wait == 1);
+-
+-	su.regs = ml_io_map(reg[0], MAX(reg[1], (uintptr_t)HEROLTE_UFS_MAP));
++	if (!su.regs) {
++		su.regs = ml_io_map(A21S_MMC_PA, A21S_MMC_MAP);
++	}
++	if (!su.regs) {
++		printf("A21S EMMC: cannot map dwmmc0 at 0x%lx\n", A21S_MMC_PA);
++		return ENXIO;
++	}
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("HEROLTE UFS: no contiguous DMA memory\n");
++		printf("A21S EMMC: no contiguous bounce memory\n");
+ 		return ENOMEM;
+ 	}
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
+-	if (!pn) {
+-		return ENOMEM;
+-	}
+-	su.dma_pa = ptoa_64(pn);
+-	su.lun = 0;
++	su.dma_pa = pn ? ptoa_64(pn) : 0;
+ 	su.secsize = DEV_BSIZE;
+ 
+ 	lck_mtx_lock(&herolte_ufs_lock);
+-	error = ufs_take_over_host();
+-	if (!error) {
+-		(void)ufs_wake_device();
+-	}
+-	if (!error) {
+-		static const uint8_t tur[6] = { 0x00 };
+-		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+-		}
+-	}
+-#if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	if (!error) {
+-		starlte_ufsp_open();
+-		uint32_t multi = 0;     /* experimental: a failed test can stop the host */
+-		PE_parse_boot_argn("ufsmulti", &multi, sizeof(multi));
+-		if (multi) {
+-			starlte_ufs_pick_stride();
+-		}
+-	}
+-#endif
++	int error = a21s_mmc_init_hw();
+ 	if (!error) {
+-		error = ufs_find_partition(want);
++		error = a21s_load_extents();
+ 	}
+ 	lck_mtx_unlock(&herolte_ufs_lock);
+ 	if (error) {
++		a21s_logdump_sync("UFS_INIT_ERR");
+ 		return error;
+ 	}
++	su.first_block = 0;
++	su.nblocks = a21s_sys_bytes / UFS_BLOCK;
+ 
+ 	su.bmajor = bdevsw_add(-1, &herolte_ufs_bdevsw);
+ 	if (su.bmajor < 0) {
+@@ -1800,12 +2459,11 @@ herolte_ufs_init(void)
+ 	su.bdev = makedev(su.bmajor, 0);
+ 	devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufsroot0");
+ 	devfs_make_node(makedev(su.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rufsroot0");
+-	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
+-	printf("HEROLTE UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+-	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+-	    su.writable ? "read-write" : "read-only", su.dma_pa);
++	printf("A21S EMMC: /dev/ufsroot0 ready: %llu blocks (%llu MiB), %s\n",
++	    su.nblocks, (su.nblocks * UFS_BLOCK) >> 20, su.writable ? "read-write" : "read-only");
++	a21s_logdump_sync("UFSROOT0_READY");
+ 	herolte_log_start();
+ 	return 0;
+ }
+@@ -1816,6 +2474,7 @@ void herolte_ufs_probe(void);
+ void
+ herolte_ufs_probe(void)
+ {
++	return;
+ 	DTEntry node;
+ 	uintptr_t const *reg = NULL;
+ 	unsigned int size = 0;
+diff --git a/bsd/dev/starlte_gpu.c b/bsd/dev/starlte_gpu.c
+index 8c30139..e8a1696 100644
+--- a/bsd/dev/starlte_gpu.c
++++ b/bsd/dev/starlte_gpu.c
+@@ -39,11 +39,11 @@ static unsigned sg_cool_level;          /* starlte_gpu_thermal(): 0 the boot's r
+ extern uint64_t sweet_fb_hold_until;
+ void starlte_gpu_probe(void);
+ 
+-#define SG_PMU_G3D_PA   0x14064000u     /* page with CONFIGURATION +0x40, STATUS +0x44 */
+-#define SG_PMU_G3D_CONF 0x40u
+-#define SG_PMU_G3D_STAT 0x44u
+-#define SG_CMU_PA       0x17400000u
+-#define SG_GPU_PA       0x17500000u
++#define SG_PMU_G3D_PA   0x11861000u     /* Exynos 850 PMU pd-g3d: +0xd00 CONF, +0xd04 STAT */
++#define SG_PMU_G3D_CONF 0xd00u
++#define SG_PMU_G3D_STAT 0xd04u
++#define SG_CMU_PA       0x11400000u
++#define SG_GPU_PA       0x11500000u
+ 
+ /* Mali Bifrost register offsets (Linux Panfrost panfrost_regs.h). */
+ #define GPU_ID                  0x000
+@@ -83,37 +83,103 @@ sg_msleep(unsigned ms)
+ 	clock_delay_until(deadline);
+ }
+ 
+-static void
+-sg_probe(vm_offset_t pmu, const char *when)
++
++/* ---- Exynos 850 Mali-G52 MP1 (0x11500000, GPU_ID 0x72120000) power & clock bring-up ---- */
++#define A21_TOP_PA              0x120e0000u
++#define A21_TOP_DIV_SWITCH      0x1844u
++#define A21_TOP_GAT_SWITCH      0x2040u
++#define A21_G3D_SWITCH_USER     0x0600u
++#define A21_G3D_PLL_CON0        0x0100u
++#define A21_G3D_PLL_CON3        0x010cu
++#define A21_G3D_MUX_BUSD        0x1000u
++#define A21_G3D_DIV_BUSP        0x1804u
++#define A21_DTZPC_G3D           0x11410204u
++static vm_offset_t a21_cmu_top, a21_cmu_g3d;
++
++static uint64_t
++a21_smc(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3)
+ {
+-	uint32_t conf = sg_rd(pmu, SG_PMU_G3D_CONF), stat = sg_rd(pmu, SG_PMU_G3D_STAT);
+-	printf("STARLTE GPU: %s: PMU G3D conf=%#x status=%#x\n", when, conf, stat);
+-	if ((stat & 0xf) != 0xf) {
+-		printf("STARLTE GPU: %s: G3D domain off; CMU and Mali not read\n", when);
+-		return;
++	register uint64_t x0 __asm__("x0") = fid;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = a3;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	return x0;
++}
++
++static bool
++a21_g52_domain_and_clocks(vm_offset_t pmu)
++{
++	static const uint32_t gates[] = { 0x2000, 0x2004, 0x200c, 0x2010, 0x2024, 0x2028, 0x202c };
++	if (sg_boot_khz != 0 && a21_cmu_top && a21_cmu_g3d && sg_gpu && (sg_rd(pmu, SG_PMU_G3D_STAT) & 1u)) {
++		/* Already switched onto PLL_G3D: never reset MUX_BUSD back to the 400 MHz switch clock! */
++		return true;
++	}
++	if (!a21_cmu_top) {
++		a21_cmu_top = ml_io_map(A21_TOP_PA, 0x3000);
+ 	}
+-	static vm_offset_t cmu;
+-	if (!cmu) {
+-		cmu = ml_io_map(SG_CMU_PA, 0x2000);
++	if (!a21_cmu_g3d) {
++		a21_cmu_g3d = ml_io_map(SG_CMU_PA, 0x3000);
+ 	}
+ 	if (!sg_gpu) {
+ 		sg_gpu = ml_io_map(SG_GPU_PA, 0x5000);
+ 	}
+-	vm_offset_t gpu = sg_gpu;
+-	if (!cmu || !gpu) {
+-		printf("STARLTE GPU: MMIO mapping failed\n");
+-		return;
++	if (!a21_cmu_top || !a21_cmu_g3d || !sg_gpu) {
++		printf("A21S GPU: MMIO map failed\n");
++		return false;
+ 	}
+-	uint32_t con0 = sg_rd(cmu, 0x140);
+-	uint64_t m = (con0 >> 16) & 0x3ff, p = (con0 >> 8) & 0x3f, s = con0 & 7;
+-	uint64_t khz = (con0 & 0x10) && p ? 26000ull * m / (p << s) : 26000;
+-	printf("STARLTE GPU: %s: PLL_G3D CON0=%#x CON2=%#x (%llu kHz%s), USER mux=%#x BUSD mux=%#x div=%#x busp=%#x\n",
+-	    when, con0, sg_rd(cmu, 0x148), khz, (con0 & (1u << 29)) ? ", locked" : ", not stable",
+-	    sg_rd(cmu, 0x100), sg_rd(cmu, 0x1000), sg_rd(cmu, 0x1800), sg_rd(cmu, 0x1804));
+-	if ((sg_rd(pmu, SG_PMU_G3D_STAT) & 0xf) != 0xf) {
+-		printf("STARLTE GPU: %s: domain went off; Mali not read\n", when);
++	/* Enable G3D switch clock in CMU_TOP and set divide-by-2 (~400 MHz). */
++	*(volatile uint32_t *)(a21_cmu_top + A21_TOP_GAT_SWITCH) |= (1u << 20) | (1u << 21);
++	*(volatile uint32_t *)(a21_cmu_top + A21_TOP_DIV_SWITCH) =
++	    (*(volatile uint32_t *)(a21_cmu_top + A21_TOP_DIV_SWITCH) & ~7u) | 1u;
++	for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_top + A21_TOP_DIV_SWITCH) & (1u << 16)); i++) {
++		delay(1);
++	}
++	if (!(sg_rd(pmu, SG_PMU_G3D_STAT) & 1u)) {
++		*(volatile uint32_t *)(pmu + SG_PMU_G3D_CONF) |= 1u;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		for (unsigned us = 0; us < 50000 && !(sg_rd(pmu, SG_PMU_G3D_STAT) & 1u); us += 10) {
++			delay(10);
++		}
++		if (!(sg_rd(pmu, SG_PMU_G3D_STAT) & 1u)) {
++			printf("A21S GPU: pd-g3d did not power on (stat=%#x)\n", sg_rd(pmu, SG_PMU_G3D_STAT));
++			return false;
++		}
++		uint64_t rc = a21_smc(0x82000410ULL, 1ULL, A21_DTZPC_G3D, 0ULL);
++		printf("A21S GPU: pd-g3d powered on, DTZPC SMC returned %#llx\n", rc);
++		if ((uint32_t)rc != 0) {
++			return false;
++		}
++	}
++	*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_SWITCH_USER) |= (1u << 4);
++	for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_SWITCH_USER) & (1u << 7)); i++) {
++		delay(1);
++	}
++	*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_MUX_BUSD) = 1u;
++	for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_MUX_BUSD) & (1u << 16)); i++) {
++		delay(1);
++	}
++	*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_DIV_BUSP) = 3u;
++	for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_DIV_BUSP) & (1u << 16)); i++) {
++		delay(1);
++	}
++	for (unsigned i = 0; i < sizeof(gates) / sizeof(gates[0]); i++) {
++		*(volatile uint32_t *)(a21_cmu_g3d + gates[i]) |= (1u << 20) | (1u << 21);
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return true;
++}
++
++static void
++sg_probe(vm_offset_t pmu, const char *when)
++{
++	uint32_t conf = sg_rd(pmu, SG_PMU_G3D_CONF), stat = sg_rd(pmu, SG_PMU_G3D_STAT);
++	printf("A21S GPU: %s: PMU G3D conf=%#x status=%#x\n", when, conf, stat);
++	if (!a21_g52_domain_and_clocks(pmu)) {
+ 		return;
+ 	}
++	vm_offset_t gpu = sg_gpu;
+ 	uint32_t id = sg_rd(gpu, GPU_ID);
+ 	printf("STARLTE GPU: %s: GPU_ID=%#x product %#x (0x6221 = Mali-G72) r%up%u\n",
+ 	    when, id, id >> 16, (id >> 12) & 0xf, (id >> 4) & 0xff);
+@@ -161,18 +227,18 @@ sg_probe(vm_offset_t pmu, const char *when)
+  * slots: 4 x 12 MiB at GPU VA 0x20000000.., their level-3 tables at +0x48000
+  * (12 MiB: iOS's 1242x2208 canvas at 5120 bytes a row is 11.3 MB).
+  */
+-#define SG_MEM_PA       0x8f0000000ull
++#define SG_MEM_PA       0x8e0000000ull
+ #define SG_MEM_BYTES    0x60000u
+ #define SG_VA           0x02000000ull   /* the data pages, from +SG_DATA_OFF */
+ #define SG_DATA_OFF     0x10000u
+ #define SG_DATA_PAGES   48u
+ #define SG_PANEL_L3_OFF 0x4000u
+-#define SG_FB_PA        0xcc000000ull
+-#define SG_FB_W         1440u
+-#define SG_FB_H         2960u
++#define SG_FB_PA        0xfa000000ull
++#define SG_FB_W         720u
++#define SG_FB_H         1600u
+ #define SG_FB_STRIDE    (SG_FB_W * 4u)
+ #define SG_PANEL_VA     0x04000000ull
+-#define SG_HEAP_PA      0x8f1000000ull
++#define SG_HEAP_PA      0x8e1000000ull
+ #define SG_HEAP_L3_OFF  0x40000u
+ 
+ #include "starlte_gpu_tri.h"
+@@ -274,7 +340,7 @@ sg_tables(void)
+ 	l2[(SG_VA >> 21) & 0x1ff] = (SG_MEM_PA + 0x3000) | 3;
+ 	for (unsigned i = 0; i < SG_DATA_PAGES; i++) {
+ 		/* Mali-LPAE leaf: read/write, outer shareable, MEMATTR index 0. */
+-		l3[i] = (SG_MEM_PA + SG_DATA_OFF + i * 0x1000) | 0x2c1;
++		l3[i] = (SG_MEM_PA + SG_DATA_OFF + i * 0x1000) | 0x743ull;
+ 	}
+ 	unsigned pages = (SG_FB_STRIDE * SG_FB_H + 0xfff) / 0x1000;
+ 	for (unsigned t = 0; t * 512 < pages; t++) {
+@@ -282,7 +348,7 @@ sg_tables(void)
+ 		volatile uint64_t *pl3 = (volatile uint64_t *)(sg_mem + table);
+ 		l2[((SG_PANEL_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
+ 		for (unsigned i = 0; i < 512 && t * 512 + i < pages; i++) {
+-			pl3[i] = (SG_FB_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
++			pl3[i] = (SG_FB_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x743ull;
+ 		}
+ 	}
+ 	for (unsigned t = 0; t * 512 < SG_TRI_HEAP_BYTES / 0x1000; t++) {
+@@ -290,7 +356,7 @@ sg_tables(void)
+ 		volatile uint64_t *hl3 = (volatile uint64_t *)(sg_mem + table);
+ 		l2[((SG_TRI_HEAP_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
+ 		for (unsigned i = 0; i < 512; i++) {
+-			hl3[i] = (SG_HEAP_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
++			hl3[i] = (SG_HEAP_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x743ull;
+ 		}
+ 	}
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+@@ -299,14 +365,15 @@ sg_tables(void)
+ static bool
+ sg_mmu_setup(void)
+ {
+-	uint64_t transtab = SG_MEM_PA | 0x7;            /* ADRMODE_TABLE | READ_INNER */
+-	printf("STARLTE GPU: AS0 before: TRANSCFG=%#x STATUS=%#x\n",
++	/* Mali-G52 (Bifrost v7, MMU_FEATURES 0x2830): AArch64 4K 4-level page tables (mode 6). */
++	uint64_t transtab = SG_MEM_PA;
++	printf("A21S GPU: AS0 before: TRANSCFG=%#x STATUS=%#x\n",
+ 	    sg_rd(sg_gpu, AS0 + 0x30), sg_rd(sg_gpu, AS0 + 0x28));
+ 	sg_wr(sg_gpu, AS0 + 0x00, (uint32_t)transtab);
+ 	sg_wr(sg_gpu, AS0 + 0x04, (uint32_t)(transtab >> 32));
+-	sg_wr(sg_gpu, AS0 + 0x08, 0x888d88);            /* MEMATTR */
+-	sg_wr(sg_gpu, AS0 + 0x0c, 0);
+-	sg_wr(sg_gpu, AS0 + 0x30, 0);                   /* TRANSCFG: legacy (LPAE) */
++	sg_wr(sg_gpu, AS0 + 0x08, 0x88888888u);         /* MEMATTR_LO */
++	sg_wr(sg_gpu, AS0 + 0x0c, 0x88888888u);         /* MEMATTR_HI */
++	sg_wr(sg_gpu, AS0 + 0x30, 0x420001c6u);         /* TRANSCFG_LO: AArch64 4K, 48-bit 4-level, L2-cached walk */
+ 	sg_wr(sg_gpu, AS0 + 0x34, 0);
+ 	sg_wr(sg_gpu, AS0 + 0x18, 1);                   /* AS_COMMAND_UPDATE */
+ 	for (unsigned i = 0; i < 10000 && (sg_rd(sg_gpu, AS0 + 0x28) & 1); i++) {
+@@ -1083,7 +1150,7 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, sweetfb_dpp, CTLTYPE_INT | CTLFLAG_RW | CTLF
+  * Jobs run synchronously under sg_lock, polled (no interrupts yet); a
+  * faulting or hung job gets the GPU reset and both address spaces back.
+  */
+-#define SGU_PT_PA       0x8f2000000ull
++#define SGU_PT_PA       0x8e2000000ull
+ #define SGU_PT_BYTES    0x400000u
+ #define SGU_PT_PIECE    0x100000u
+ #define SGU_L3_FIRST    0x6000u
+@@ -1126,15 +1193,15 @@ sgu_as_wait(unsigned as)
+ static bool
+ sgu_as_enable(unsigned as, uint64_t table_pa)
+ {
+-	uint64_t transtab = table_pa | 0x7;
++	uint64_t transtab = table_pa;
+ 	if (!sgu_as_wait(as)) {
+ 		return false;
+ 	}
+ 	sg_wr(sg_gpu, ASN(as) + 0x00, (uint32_t)transtab);
+ 	sg_wr(sg_gpu, ASN(as) + 0x04, (uint32_t)(transtab >> 32));
+-	sg_wr(sg_gpu, ASN(as) + 0x08, 0x888d88);
+-	sg_wr(sg_gpu, ASN(as) + 0x0c, 0);
+-	sg_wr(sg_gpu, ASN(as) + 0x30, 0);
++	sg_wr(sg_gpu, ASN(as) + 0x08, 0x88888888u);
++	sg_wr(sg_gpu, ASN(as) + 0x0c, 0x88888888u);
++	sg_wr(sg_gpu, ASN(as) + 0x30, 0x420001c6u);     /* AArch64 4K, 48-bit 4-level, L2-cached walk */
+ 	sg_wr(sg_gpu, ASN(as) + 0x34, 0);
+ 	sg_wr(sg_gpu, ASN(as) + 0x18, 1);               /* UPDATE */
+ 	return sgu_as_wait(as);
+@@ -1367,7 +1434,7 @@ starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool g
+ 		if (l3[(v >> 12) & 0x1ff] == 0) {
+ 			sgu_l3_count[sgu_l3_index(l2[l2i])]++;
+ 		}
+-		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | (gpu_writes ? 0x2c1 : 0x241);
++		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | (gpu_writes ? 0x743ull : 0x7c3ull);
+ 	}
+ 	bool ok = i == n;
+ 	if (!ok) {
+@@ -1585,9 +1652,9 @@ static uint32_t sgu_flushred;
+ #define JOB_IRQ_MASK            0x1008
+ #define JOB_IRQ_STATUS          0x100c
+ #define MMU_IRQ_MASK            0x2008
+-#define SGU_INTID_JOB           314             /* SPI 282 */
+-#define SGU_INTID_MMU           313             /* SPI 281 */
+-#define SGU_INTID_GPU           315             /* SPI 283 */
++#define SGU_INTID_JOB           158             /* Exynos 850 11500000.mali JOB: SPI 126 (GIC-0 158 Level) */
++#define SGU_INTID_MMU           159             /* Exynos 850 11500000.mali MMU: SPI 127 (GIC-0 159 Level) */
++#define SGU_INTID_GPU           157             /* Exynos 850 11500000.mali GPU: SPI 125 (GIC-0 157 Level) */
+ #define SGU_MMU_BITS            0x00030003u     /* AS0 and AS1: page fault (n) and bus error (n + 16) */
+ #define SGU_GPU_BITS            0x81u           /* GPU_FAULT and MULTIPLE_GPU_FAULTS, what the polled path looks at */
+ extern kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+@@ -2302,82 +2369,40 @@ starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done)
+ static void
+ sg_jobs(vm_offset_t pmu)
+ {
+-	if ((sg_rd(pmu, SG_PMU_G3D_STAT) & 0xf) != 0xf || !sg_gpu ||
+-	    (sg_rd(sg_gpu, GPU_ID) >> 16) != 0x6221) {
+-		printf("STARLTE GPU: stage 2: domain off or not a G72; no jobs\n");
+-		return;
+-	}
+-	vm_offset_t cmu = ml_io_map(SG_CMU_PA, 0x1000);
+-	if (!cmu || !(sg_rd(cmu, 0x140) & (1u << 29))) {
+-		printf("STARLTE GPU: stage 2: PLL_G3D not locked; no jobs\n");
++	if (!a21_g52_domain_and_clocks(pmu)) {
+ 		return;
+ 	}
+-	uint8_t was = 0, now = 0;
+-	if (!starlte_pmic_read(1, SG_BUCK6, &was)) {
+-		printf("STARLTE GPU: stage 2: BUCK6 unreadable; no jobs\n");
++	uint32_t prod = sg_rd(sg_gpu, GPU_ID) >> 16;
++	if (prod != 0x7212u && (prod & 0xf000u) != 0x7000u) {
++		printf("A21S GPU: unexpected GPU_ID product %#x; no jobs\n", prod);
+ 		return;
+ 	}
+-	/* 0x20 = 500 mV .. 0x70 = 1000 mV; anything else is not vdd_g3d as known. */
+-	if (was < 0x20 || was > 0x70) {
+-		printf("STARLTE GPU: stage 2: BUCK6 vsel %#x unexpected; no jobs\n", was);
+-		return;
+-	}
+-	bool volt = starlte_pmic_write(1, SG_BUCK6, SG_BUCK6_950MV);
+-	delay(1000);                                    /* ramp: well under 1 ms */
+-	(void)starlte_pmic_read(1, SG_BUCK6, &now);
+-	printf("STARLTE GPU: vdd_g3d BUCK6 %#x (%u uV) -> %#x (%u uV) %s\n", was,
+-	    300000u + was * 6250u, now, 300000u + now * 6250u,
+-	    volt && now == SG_BUCK6_950MV ? "ok" : "FAILED");
+-	if (!volt || now != SG_BUCK6_950MV) {
+-		goto restore;
+-	}
+ 	sg_mem = ml_io_map((vm_offset_t)SG_MEM_PA, SG_MEM_BYTES);
+ 	if (!sg_mem) {
+-		printf("STARLTE GPU: GPU memory mapping failed\n");
+-		goto restore;
++		printf("A21S GPU: GPU memory mapping failed\n");
++		return;
+ 	}
+ 	uint32_t shaders = sg_rd(sg_gpu, SHADER_PRESENT_LO);
+ 	if (sg_gpu_up(shaders)) {
+ 		bool a = sg_write_value(0x000, 0x100, 3, 0, 0, shaders, "WRITE_VALUE zero");
+ 		bool b = sg_write_value(0x200, 0x300, 7, 0x4554494252415453ull,
+ 		    0x4554494252415453ull, shaders, "WRITE_VALUE STARBITE");
+-		printf("STARLTE GPU: stage 2 %s\n", a && b ? "PASSED" : "did not pass");
+-		if (a && b) {
+-			/* Stages 3 and 4 draw on the panel and read it back: hold
+-			 * SweetFramebuffer's CPU copies meanwhile (with 8 cores iOS
+-			 * is already presenting by now; one landed in the triangle
+-			 * check), and let a copy in flight finish first. */
+-			uint64_t hold;
+-			clock_interval_to_deadline(3, NSEC_PER_SEC, &hold);
+-			sweet_fb_hold_until = hold;
+-			sg_msleep(100);
+-			sg_stage3(shaders);
+-			/* Fresh reset, tables and AS0 for the draw, then again for
+-			 * the present (stage 5), which keeps the GPU powered. */
+-			bool drawn = sg_gpu_up(shaders) && sg_stage4(shaders);
+-			sweet_fb_hold_until = 0;
+-			if (drawn && sg_gpu_up(shaders)) {
+-				sg_clock_up();
+-				sgp_shaders = shaders;
+-				__atomic_thread_fence(__ATOMIC_RELEASE);
+-				sgp_ready = true;
+-				sgu_ready = sgu_setup();
+-				printf("STARLTE GPU: stage 6: GPU for apps %s (AS1, tables at %#llx)\n",
+-				    sgu_ready ? "ready" : "NOT ready", SGU_PT_PA);
+-				if (sgu_ready) {
+-					starbite_mali_publish();
+-				}
+-				printf("STARLTE GPU: stage 5: GPU present ready (%u x %u canvas), cores on, "
+-				    "vdd_g3d stays at 950 mV\n", SG_PRES_CANVAS_W, SG_PRES_CANVAS_H);
+-				return;
++		printf("A21S GPU: Mali-G52 MP1 stage 2 %s\n", a && b ? "PASSED" : "did not pass");
++		if (a && b && sg_gpu_up(shaders)) {
++			sg_clock_up();
++			sgp_shaders = shaders;
++			__atomic_thread_fence(__ATOMIC_RELEASE);
++			sgp_ready = false; /* 1:1 720x1600 scanout uses fast CPU present; apps use Mali-G52 AS1 */
++			sgu_ready = sgu_setup();
++			printf("A21S GPU: stage 6: Mali-G52 MP1 for apps %s (AS1 AArch64-4K, tables at %#llx)\n",
++			    sgu_ready ? "READY" : "NOT ready", SGU_PT_PA);
++			if (sgu_ready) {
++				starbite_mali_publish();
+ 			}
++			return;
+ 		}
+ 	}
+ 	sg_cores_off();
+-restore:
+-	if (starlte_pmic_write(1, SG_BUCK6, was) && starlte_pmic_read(1, SG_BUCK6, &now)) {
+-		printf("STARLTE GPU: vdd_g3d BUCK6 back to %#x (%u uV)\n", now, 300000u + now * 6250u);
+-	}
+ }
+ 
+ /*
+@@ -2391,47 +2416,41 @@ restore:
+ static uint32_t
+ sg_clock_khz(void)
+ {
+-	static vm_offset_t cmu;
+-	if (!cmu) {
+-		cmu = ml_io_map(SG_CMU_PA, 0x2000);
++	if (!a21_cmu_g3d) {
++		return 400000;
+ 	}
+-	uint32_t con0 = cmu ? sg_rd(cmu, 0x140) : 0;
+-	uint64_t m = (con0 >> 16) & 0x3ff, p = (con0 >> 8) & 0x3f, s = con0 & 7;
+-	if (!(con0 & (1u << 29)) || !p) {
+-		return 0;                       /* not locked */
++	uint32_t sel = sg_rd(a21_cmu_g3d, A21_G3D_PLL_CON0);
++	uint32_t con3 = sg_rd(a21_cmu_g3d, A21_G3D_PLL_CON3);
++	if (!(sel & 0x10u) || (sg_rd(a21_cmu_g3d, A21_G3D_MUX_BUSD) & 1u)) {
++		return 400000;
+ 	}
+-	return (con0 & 0x10) ? (uint32_t)(26000ull * m / (p << s)) : 26000;
++	uint64_t m = (con3 >> 16) & 0x3ffu, p = (con3 >> 8) & 0x3fu, s = con3 & 7u;
++	return p ? (uint32_t)(26000ull * m / (p << s)) : 400000;
+ }
+ 
+ static void
+ sg_clock_up(void)
+ {
+-	static const uint32_t levels[] = { 572000, 546000, 455000, 338000, 299000, 260000 };
+-	uint32_t want = 572000;
+-	PE_parse_boot_argn("stargpu", &want, sizeof(want));
+-	bool listed = false;
+-	for (unsigned i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+-		listed |= levels[i] == want;
+-	}
+-	if (want == 0 || !listed) {
+-		printf("STARLTE GPU: clock left at %u kHz (stargpu=%u)\n", sg_clock_khz(), want);
++	uint32_t want = 1001000;
++	PE_parse_boot_argn("mali_a21s_khz", &want, sizeof(want));
++	if (want == 0 || want > 1001000 || !a21_cmu_g3d) {
++		printf("A21S GPU: keeping ~400 MHz switch clock\n");
+ 		return;
+ 	}
+-	uint32_t before = sg_clock_khz();
+ 	bool sent = starlte_acpm_dvfs(4, want);
+-	delay(1000);
+-	uint8_t volt = 0;
+-	bool v = starlte_pmic_write(1, SG_BUCK6, SG_BUCK6_950MV) && starlte_pmic_read(1, SG_BUCK6, &volt);
+-	uint32_t after = sg_clock_khz();
+-	printf("STARLTE GPU: clock %u -> %u kHz (asked %u, %s), vdd_g3d %s %u uV\n", before, after, want,
+-	    sent ? "sent" : "no reply", v ? "at" : "NOT SET,", 300000u + volt * 6250u);
+-	if (sent && after == 0) {
+-		(void)starlte_acpm_dvfs(4, 260000);
+-		printf("STARLTE GPU: PLL not locked at %u kHz: back to 260000 (%u kHz)\n", want, sg_clock_khz());
+-		return;
+-	}
+-	if (sent) {
+-		sg_boot_khz = want;             /* what the heat may take down and gives back (starlte_gpu_thermal) */
++	delay(2000);
++	uint32_t con3 = sg_rd(a21_cmu_g3d, A21_G3D_PLL_CON3);
++	uint64_t m = (con3 >> 16) & 0x3ffu, p = (con3 >> 8) & 0x3fu, s = con3 & 7u;
++	uint32_t khz = p ? (uint32_t)(26000ull * m / (p << s)) : 0;
++	if (sent && ((con3 >> 31) & 1u) && ((con3 >> 29) & 1u) && khz >= 200000) {
++		*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_PLL_CON0) |= 0x10u;
++		for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_PLL_CON0) & 0x80u); i++) delay(1);
++		*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_MUX_BUSD) &= ~1u;
++		for (unsigned i = 0; i < 1000 && (*(volatile uint32_t *)(a21_cmu_g3d + A21_G3D_MUX_BUSD) & (1u << 16)); i++) delay(1);
++		sg_boot_khz = khz;
++		printf("A21S GPU: switched to PLL_G3D at %u kHz (asked %u kHz)\n", khz, want);
++	} else {
++		printf("A21S GPU: PLL_G3D con3=%#x (%u kHz); staying on 400 MHz switch clock\n", con3, khz);
+ 	}
+ }
+ 
+@@ -2569,12 +2588,11 @@ sg_thread(void *arg, __unused wait_result_t wr)
+ 		printf("STARLTE GPU: PMU mapping failed\n");
+ 		return;
+ 	}
+-	/* Once early, once after the UI is up (in case something changed it). */
+-	sg_msleep(5000);
+-	sg_probe(pmu, "5s");
++	/* Bring up Mali-G52 promptly (2.5 s) so backboardd sees StarbiteMali immediately. */
++	sg_msleep(2000);
++	sg_probe(pmu, "2s");
+ 	if (mode >= 2) {
+-		/* After the touch thread's ACPM traffic (2 s) and before the UI. */
+-		sg_msleep(3000);
++		sg_msleep(500);
+ 		sg_jobs(pmu);
+ 	}
+ 	sg_msleep(52000);
+diff --git a/bsd/dev/starlte_sd.c b/bsd/dev/starlte_sd.c
+index 3ac8fab..00077e4 100644
+--- a/bsd/dev/starlte_sd.c
++++ b/bsd/dev/starlte_sd.c
+@@ -824,6 +824,8 @@ int starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx);
+ int
+ starlte_sd_dump_log(const void *ring, uint32_t size, uint32_t bufx)
+ {
++	(void)ring; (void)size; (void)bufx;
++	return ENODEV;
+ 	uint32_t on = 0;
+ 	PE_parse_boot_argn("sdlog", &on, sizeof(on));
+ 	if (!on || sd.state != 1 || sd.card_sectors != 249999360ULL || ((uintptr_t)ring & 7) ||
+@@ -1489,6 +1491,8 @@ int starlte_sd_rootdev(dev_t *dev);
+ int
+ starlte_sd_rootdev(dev_t *dev)
+ {
++	(void)dev;
++	return ENODEV; /* 0x11500000 is Mali-G52 on Exynos 850 */
+ 	if (sd.ready) {
+ 		/*
+ 		 * IOFindBSDRoot runs again only after vfs_mountroot failed (bsd_init's mount loop). This
+@@ -1592,6 +1596,7 @@ void starlte_sd_probe(void);
+ void
+ starlte_sd_probe(void)
+ {
++	return; /* 0x11500000 is Mali-G52 on Exynos 850 */
+ 	uint32_t mode = 0, hold = 0, bench = 16;
+ 	PE_parse_boot_argn("sdprobe", &mode, sizeof(mode));
+ 	PE_parse_boot_argn("sdhold", &hold, sizeof(hold));
+diff --git a/bsd/dev/starlte_touch.c b/bsd/dev/starlte_touch.c
+index cc08d33..a1251d9 100644
+--- a/bsd/dev/starlte_touch.c
++++ b/bsd/dev/starlte_touch.c
+@@ -141,10 +141,11 @@ st_msleep(unsigned ms)
+  *   3.0 V = 0x30 (s2mps18.c, s2mps18-private.h; tsp_avdd is 3000000 uV
+  *   in the starlte DTB, and S-Boot leaves exactly 0x30 programmed).
+  */
+-#define ACPM_MBOX_PA            0x14100000u
++#define ACPM_MBOX_PA            0x11900000u
+ #define ACPM_SRAM_PA            0x02039000u
++#define ACPM_SRAM_FIRST         0x3000u
+ #define ACPM_SRAM_SIZE          0x30000u
+-#define ACPM_INITDATA           0x7f00u
++#define ACPM_INITDATA           0x7000u
+ #define ACPM_PMIC_CH            2u
+ 
+ static vm_offset_t acpm_mbox, acpm_sram;
+@@ -172,7 +173,11 @@ static bool
+ acpm_init(void)
+ {
+ 	acpm_mbox = ml_io_map(ACPM_MBOX_PA, 0x1000);
+-	acpm_sram = ml_io_map(ACPM_SRAM_PA, ACPM_SRAM_SIZE);
++	vm_offset_t sram_hi = ml_io_map(ACPM_SRAM_PA + ACPM_SRAM_FIRST, ACPM_SRAM_SIZE - ACPM_SRAM_FIRST);
++	acpm_sram = sram_hi ? (sram_hi - ACPM_SRAM_FIRST) : 0;
++	if (!acpm_mbox || !sram_hi) {
++		return false;
++	}
+ 	uint32_t chans = acpm_rd(ACPM_INITDATA + 0x08);
+ 	uint32_t ap_max = acpm_rd(ACPM_INITDATA + 0x18);
+ 	char build[26];
+@@ -315,47 +320,55 @@ static void
+ st_cpu_dvfs(void)
+ {
+ 	char arg[32] = "";
+-	uint32_t little = 1690000, big = 1794000;
++	uint32_t little = 2002000, big = 2002000;
+ 	if (PE_parse_boot_argn("starcpu", arg, sizeof(arg))) {
+ 		if (arg[0] == '0' && arg[1] == 0) {
+-			printf("STARLTE DVFS: starcpu=0: CPU clocks left as S-Boot set them\n");
++			printf("A21S DVFS: starcpu=0: CPU clocks left as S-Boot set them\n");
+ 			return;
+ 		}
+ 		char *end = arg;
+ 		little = (uint32_t)strtoul(arg, &end, 10);
+-		big = *end == ',' ? (uint32_t)strtoul(end + 1, NULL, 10) : big;
++		big = *end == ',' ? (uint32_t)strtoul(end + 1, NULL, 10) : little;
+ 	}
+-	if (little > 1794000 || big > 1794000) {
+-		printf("STARLTE DVFS: %u/%u kHz above 1794000: not without thermal control\n", little, big);
+-		return;
++	if (little > 2210000 || big > 2210000) {
++		little = big = 2002000;
+ 	}
+-	/* channel index 0 as Linux, then the descriptor whose id is 5 as the DT says */
+-	uint32_t descs[2] = { acpm_chans, acpm_find(5) };
++	uint32_t bus_on = 1;
++	(void)PE_parse_boot_argn("a21s_bus", &bus_on, sizeof(bus_on));
++	uint64_t ns_now = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns_now);
++	uint32_t stamp = (uint32_t)(ns_now / 1000000ULL);
++	uint32_t descs[2] = { acpm_find(0), acpm_chans };
+ 	for (unsigned d = 0; d < 2; d++) {
+ 		uint32_t c = descs[d];
+ 		if (c == 0) {
+ 			continue;
+ 		}
+ 		uint32_t id = acpm_rd(c);
+-		uint32_t set0[4] = { 2, little, 0, 0 }, set1[4] = { 3, big, 0, 0 };
++		uint32_t set0[4] = { 2, little, 0, stamp }, set1[4] = { 3, big, 0, stamp };
+ 		bool ok0 = acpm_send_on(c, id, set0), ok1 = ok0 && acpm_send_on(c, id, set1);
+-		uint32_t get0[4] = { 2, 0, 1, 0 }, get1[4] = { 3, 0, 1, 0 };
+-		if (ok1) {
+-			(void)acpm_send_on(c, id, get0);
+-			(void)acpm_send_on(c, id, get1);
++		/*
++		 * Exynos 850 (S5E3830) boot_info holds MIF=1539000 (domain 0), INT=667000 (domain 1),
++		 * DISP=400000 (domain 7) for only 40 s (0x28), after which ACPM drops INT to 50 MHz and
++		 * MIF to 421 MHz (6.5x GPU slowdown). Vote for those exact boot rates at t=2 s so ACPM
++		 * keeps them warm with zero clock transition glitch.
++		 */
++		uint32_t smif[4] = { 0, 1539000, 0, stamp };
++		uint32_t sint[4] = { 1, 667000, 0, stamp };
++		uint32_t sdisp[4] = { 7, 400000, 0, stamp };
++		bool ok_mif = false, ok_int = false, ok_disp = false;
++		if (ok1 && bus_on) {
++			ok_mif = acpm_send_on(c, id, smif);
++			ok_int = acpm_send_on(c, id, sint);
++			ok_disp = acpm_send_on(c, id, sdisp);
+ 		}
+-		printf("STARLTE DVFS: channel id %u: cpucl0 %u kHz %s (reply %#x %#x %#x), cpucl1 %u kHz %s (reply %#x %#x "
+-		    "%#x); FREQ_GET says %u / %u kHz\n", id, little, ok0 ? "sent" : "no reply", set0[0], set0[1], set0[2], big,
+-		    ok1 ? "sent" : "no reply", set1[0], set1[1], set1[2], get0[1], get1[1]);
++		printf("A21S DVFS: ch %u: cpucl0 %u (%s, r %#x) cpucl1 %u (%s, r %#x); bus=%u MIF=%s/%#x INT=%s/%#x DISP=%s/%#x\n",
++		    id, little, ok0 ? "ok" : "err", set0[1], big, ok1 ? "ok" : "err", set1[1], bus_on,
++		    ok_mif ? "ok" : "skip", smif[1], ok_int ? "ok" : "skip", sint[1], ok_disp ? "ok" : "skip", sdisp[1]);
+ 		if (ok1) {
+ 			break;
+ 		}
+ 	}
+-	/*
+-	 * Not the buses: asking ACPM for MIF 2093000 / INT 667000 kHz here (DT levels) froze the phone
+-	 * at once, the display going green (boot69): the memory clock changes under the display's DMA
+-	 * with nothing coordinating it. Left as S-Boot set them.
+-	 */
+ }
+ 
+ static bool
+@@ -422,8 +435,12 @@ starlte_acpm_dvfs(uint32_t domain, uint32_t khz)
+ 	if (!acpm_ready() || acpm_chans == 0) {
+ 		return false;
+ 	}
+-	uint32_t cmd[4] = { domain, khz, 0, 0 };
+-	bool ok = acpm_send_on(acpm_chans, acpm_rd(acpm_chans), cmd);
++	uint64_t ns_now = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns_now);
++	uint32_t ch0 = acpm_find(0);
++	if (!ch0) ch0 = acpm_chans;
++	uint32_t cmd[4] = { domain, khz, 0, (uint32_t)(ns_now / 1000000ULL) };
++	bool ok = acpm_send_on(ch0, acpm_rd(ch0), cmd);
+ 	printf("STARLTE DVFS: domain %u %u kHz %s (reply %#x %#x %#x)\n", domain, khz, ok ? "sent" : "no reply",
+ 	    cmd[0], cmd[1], cmd[2]);
+ 	return ok;
+@@ -926,6 +943,11 @@ static const struct st_step st_script_bright[] = {
+ 	{ 98, 1, 0, 0, 0, 0 },                  /* Home: closes it */
+ };
+ 
++static const struct st_step st_script_a21s_unlock[] = {
++	{ 16, 0, 360, 1592, 360, 720 },         /* A21s 720x1600 bottom-edge swipe up to unlock */
++	{ 26, 0, 620, 800, 100, 800 },          /* Home screen page swipe */
++};
++
+ static void
+ st_script_thread(void *arg, __unused wait_result_t wr)
+ {
+@@ -948,6 +970,7 @@ st_script_thread(void *arg, __unused wait_result_t wr)
+ 	case 4: script = st_script_tour; count = sizeof(st_script_tour) / sizeof(st_script_tour[0]); break;
+ 	case 5: script = st_script_bench; count = sizeof(st_script_bench) / sizeof(st_script_bench[0]); break;
+ 	case 6: script = st_script_bright; count = sizeof(st_script_bright) / sizeof(st_script_bright[0]); break;
++	case 7: script = st_script_a21s_unlock; count = sizeof(st_script_a21s_unlock) / sizeof(st_script_a21s_unlock[0]); break;
+ 	default: script = (const struct st_step *)st_script; count = sizeof(st_script) / sizeof(st_script[0]); break;
+ 	}
+ 	for (unsigned i = 0; i < count; i++) {
+@@ -1095,10 +1118,10 @@ hakios_input_console_touch(const char *arg)
+ 		return;
+ 	}
+ 	st_con_job.key = -1;
+-	st_con_job.x0 = 36 + v[0] * 1368 / 1000;
+-	st_con_job.y0 = v[1] * 2959 / 1000;
+-	st_con_job.x1 = 36 + v[2] * 1368 / 1000;
+-	st_con_job.y1 = v[3] * 2959 / 1000;
++	st_con_job.x0 = v[0] * 719 / 1000;
++	st_con_job.y0 = v[1] * 1599 / 1000;
++	st_con_job.x1 = v[2] * 719 / 1000;
++	st_con_job.y1 = v[3] * 1599 / 1000;
+ 	st_con_job.ms = v[4] < 50 ? 50 : v[4] > 5000 ? 5000 : (unsigned)v[4];
+ 	printf("STARLTE TOUCH: console %s %d,%d -> %d,%d (panel pixels) in %u ms\n", n == 2 ? "tap" : "swipe", st_con_job.x0,
+ 	    st_con_job.y0, st_con_job.x1, st_con_job.y1, n == 2 ? 70 : st_con_job.ms);
+@@ -1137,21 +1160,114 @@ hakios_input_console_button(const char *arg)
+ 	(void)st_con_start();
+ }
+ 
++
++/* ---- Galaxy A21s (SM-A217F): Core-0 A21SMBOX consumer + Exynos 850 CPU DVFS ---- */
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++extern void starlte_return_to_recovery(void);
++extern void sweet_hid_key(int key, int down);
++
++#define A21S_MBOX_MAGIC  0x584f424d53313241ULL /* "A21SMBOX" */
++#define A21S_MBOX_EVENTS 128
++
++struct a21s_mbox_event {
++	uint32_t type;      /* 1 down, 2 move, 3 up; 4 button down, 5 button up */
++	uint32_t finger;    /* slot 0..9, or button: 1 lock, 2 vol+, 3 vol- */
++	uint32_t x, y;      /* 0..719, 0..1599 panel pixels */
++};
++struct a21s_mbox_ring {
++	uint64_t magic;
++	uint32_t version, head;
++	uint32_t chip, events_size;
++	uint64_t irqs, frames, bad;
++	struct a21s_mbox_event ev[A21S_MBOX_EVENTS];
++};
++
++static void
++a21s_touch_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	/* Raise Cortex-A55 clusters via Exynos 850 ACPM DVFS once root mount settles. */
++	st_msleep(1500);
++	if (acpm_ready()) {
++		st_cpu_dvfs();
++	}
++	uint64_t pa = 0;
++	if (!PE_parse_boot_argn("a21s_mbox", &pa, sizeof(pa)) || pa == 0) {
++		printf("A21S INPUT: no a21s_mbox= address on cmdline; touch ring inactive\n");
++		return;
++	}
++	vm_offset_t page_off = (vm_offset_t)(pa & (PAGE_SIZE - 1));
++	vm_size_t map_sz = (page_off + sizeof(struct a21s_mbox_ring) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
++	vm_offset_t base = ml_io_map_wcomb((vm_offset_t)(pa & ~(PAGE_SIZE - 1)), map_sz);
++	if (!base) {
++		printf("A21S INPUT: ml_io_map_wcomb(%#llx) failed\n", pa);
++		return;
++	}
++	volatile struct a21s_mbox_ring *mb = (volatile struct a21s_mbox_ring *)(base + page_off);
++	if (mb->magic != A21S_MBOX_MAGIC || mb->events_size != sizeof(struct a21s_mbox_event)) {
++		printf("A21S INPUT: bad magic %#llx at %#llx\n", mb->magic, pa);
++		return;
++	}
++	printf("A21S INPUT: connected to Core-0 A21SMBOX at %#llx (chip=%u, irqs=%llu)\n",
++	    pa, mb->chip, mb->irqs);
++
++	uint32_t tail = 0, last_chip = 0;
++	uint64_t chord_at = 0;
++	uint32_t down_mask = 0;
++	for (;;) {
++		uint32_t head = mb->head;
++		__asm__ volatile ("dmb ld" ::: "memory");
++		if (head - tail > A21S_MBOX_EVENTS) {
++			tail = head - A21S_MBOX_EVENTS;
++		}
++		while (tail != head) {
++			struct a21s_mbox_event e = mb->ev[tail % A21S_MBOX_EVENTS];
++			tail++;
++			if (e.type >= 1 && e.type <= 3 && e.finger < ST_FINGERS) {
++				int down = (e.type != 3);
++				if (down) {
++					down_mask |= (1u << e.finger);
++				} else {
++					down_mask &= ~(1u << e.finger);
++				}
++				sweet_hid_touch((int)e.finger, down, (int)e.x, (int)e.y);
++			} else if (e.type == 4 || e.type == 5) {
++				int down = (e.type == 4);
++				if (e.finger == 1) {
++					chord_at = down ? mach_absolute_time() : 0;
++					sweet_hid_key(0, down); /* Power / Lock */
++				} else if (e.finger == 2) {
++					sweet_hid_key(1, down); /* Vol+ */
++				} else if (e.finger == 3) {
++					sweet_hid_key(2, down); /* Vol- */
++				}
++			}
++		}
++		if (chord_at != 0) {
++			uint64_t ns = 0;
++			absolutetime_to_nanoseconds(mach_absolute_time() - chord_at, &ns);
++			if (ns >= 3000ULL * NSEC_PER_MSEC) {
++				printf("A21S INPUT: Vol+ & Vol- held 3 s -> flushing log and rebooting to Android\n");
++				starlte_return_to_recovery();
++				chord_at = 0;
++			}
++		}
++		if (mb->chip != last_chip) {
++			last_chip = mb->chip;
++			printf("A21S INPUT: HX83112A touch controller %s (irqs=%llu frames=%llu)\n",
++			    last_chip ? "online" : "offline", mb->irqs, mb->frames);
++		}
++		st_msleep(2);
++	}
++}
++
+ void
+ starlte_touch_probe(void)
+ {
+ 	uint32_t on = 1;
+ 	thread_t thread;
+ 
+-	extern uint32_t sweet_speed_flags(void);
+-	uint32_t script = 0, sbx = sweet_speed_flags();
+-	if ((sbx & 4096) != 0) {
+-		script = 5;                     /* the bench input */
+-	}
+-	if ((sbx & 8192) != 0) {
+-		script = 6;                     /* the brightness slider test */
+-	}
+-	if ((script != 0 || PE_parse_boot_argn("sweetswipe", &script, sizeof(script))) && script &&
++	uint32_t script = 0;
++	if (PE_parse_boot_argn("sweetswipe", &script, sizeof(script)) && script &&
+ 	    kernel_thread_start(st_script_thread, (void *)(uintptr_t)script, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+@@ -1159,18 +1275,13 @@ starlte_touch_probe(void)
+ 	if (!on) {
+ 		return;
+ 	}
+-	st_alive = ml_io_map(ST_ALIVE_PA, 0x1000);
+-	printf("STARLTE TOUCH: INT pin %s at probe\n", st_int_low() ? "low" : "high");
+-	uint32_t pri = on, ms = 0;      /* startouch=N, N > 1: the thread's priority (short: the command line is full) */
+-	if (PE_parse_boot_argn("startouch_ms", &ms, sizeof(ms)) && ms >= 2 && ms <= 20) {
+-		st_poll_ms = ms;
+-	}
++	uint32_t pri = on;
+ 	kern_return_t kr;
+ 	if (pri >= 2 && pri <= 95) {
+-		kr = kernel_thread_start_priority((thread_continue_t)st_thread, NULL, (integer_t)pri, &thread);
+-		printf("STARLTE TOUCH: thread at priority %u, every %u ms\n", pri, st_poll_ms);
++		kr = kernel_thread_start_priority((thread_continue_t)a21s_touch_thread, NULL, (integer_t)pri, &thread);
++		printf("A21S INPUT: thread started at priority %u\n", pri);
+ 	} else {
+-		kr = kernel_thread_start(st_thread, NULL, &thread);
++		kr = kernel_thread_start(a21s_touch_thread, NULL, &thread);
+ 	}
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+diff --git a/bsd/dev/starlte_usbcon.c b/bsd/dev/starlte_usbcon.c
+index 12b800f..2ad0511 100644
+--- a/bsd/dev/starlte_usbcon.c
++++ b/bsd/dev/starlte_usbcon.c
+@@ -169,7 +169,13 @@ hakios_say(const char *format, ...)
+  * camera's driver, bsd/dev/hakios.exynos_camera.c, boot-arg cam_s9=6 or 7) */
+ #include <sys/sysctl.h>
+ SYSCTL_NODE(_kern, OID_AUTO, hakios, CTLFLAG_RW | CTLFLAG_LOCKED, NULL, "hakios (USB console only)");
++extern void sweet_hid_touch(int index, int down, int x, int y);
+ void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
+-void hakios_touch_post(__unused uint32_t type, __unused uint32_t finger, __unused uint32_t x, __unused uint32_t y) {}
++void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
++{
++	if (type >= 1 && type <= 3 && finger < 10) {
++		sweet_hid_touch((int)finger, type != 3, (int)x, (int)y);
++	}
++}
+ const char *hakios_exynos_iris_shot(uint32_t n);
+ const char *hakios_exynos_iris_shot(__unused uint32_t n) { return "no iris driver on this kernel"; }
+diff --git a/bsd/dev/starlte_wifi.c b/bsd/dev/starlte_wifi.c
+index 7d55bdb..caa64a5 100644
+--- a/bsd/dev/starlte_wifi.c
++++ b/bsd/dev/starlte_wifi.c
+@@ -50,7 +50,7 @@
+ 
+ #define WIFI_DIR_DEFAULT        "/private/var/hakios/wifi/"
+ #define WIFI_FILE_LARGEST       (4u << 20)
+-#define WIFI_FILES_KEPT         12
++#define WIFI_FILES_KEPT         24
+ 
+ static LCK_GRP_DECLARE(starlte_wifi_group, "starlte-wifi");
+ static LCK_MTX_DECLARE(files_lock, &starlte_wifi_group);
+@@ -131,11 +131,13 @@ starlte_wifi_image_file(const char *dir, const char *name, uint64_t *size, int *
+ 	const uint8_t *found = NULL;
+ 	uint8_t *data = NULL, *result;
+ 	uint64_t length = 0;
+-	uint32_t steps = 0;
++	uint32_t steps = 0, scsc_steps = 0;
+ 	int e;
+ 
+-	/* only with the Wi-Fi on: without wifi_pcie=N no file is looked for here and nobody waits for the root filesystem */
+-	if (!PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps)) || steps == 0) {
++	/* only with the Wi-Fi on: without wifi_pcie=N or scsc_wlan=N no file is looked for here */
++	PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps));
++	PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps));
++	if (steps == 0 && scsc_steps == 0) {
+ 		return NULL;
+ 	}
+ 	if (disk_out != NULL) {
+@@ -202,23 +204,26 @@ hakios_partition_file(__unused const char *partition, __unused const char *mount
+ 	return ENOENT;
+ }
+ 
+-/* INTx through the GIC (brcmfmac=5): not on this tree yet; the driver polls */
++extern kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
++extern void starlte_gic_spi_mask(uint32_t intid);
++extern void starlte_gic_spi_unmask(uint32_t intid);
++extern void starlte_gic_spi_detach(uint32_t intid);
++extern uint64_t starlte_gic_spi_count(uint32_t intid);
++
+ kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+ kern_return_t
+-gic_v3_spi_attach(uint32_t intid, __unused bool edge, __unused void (*handler)(void *context, uint32_t intid),
+-    __unused void *context)
++gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context)
+ {
+-	printf("wifi: SPI %u: no GIC attach on this kernel: the radio is polled\n", intid);
+-	return KERN_NOT_SUPPORTED;
++	return starlte_gic_spi_attach(intid, edge, handler, context);
+ }
+ void gic_v3_spi_mask(uint32_t intid);
+-void gic_v3_spi_mask(__unused uint32_t intid) {}
++void gic_v3_spi_mask(uint32_t intid) { starlte_gic_spi_mask(intid); }
+ void gic_v3_spi_unmask(uint32_t intid);
+-void gic_v3_spi_unmask(__unused uint32_t intid) {}
++void gic_v3_spi_unmask(uint32_t intid) { starlte_gic_spi_unmask(intid); }
+ void gic_v3_spi_detach(uint32_t intid);
+-void gic_v3_spi_detach(__unused uint32_t intid) {}
++void gic_v3_spi_detach(uint32_t intid) { starlte_gic_spi_detach(intid); }
+ uint64_t gic_v3_spi_count(uint32_t intid);
+-uint64_t gic_v3_spi_count(__unused uint32_t intid) { return 0; }
++uint64_t gic_v3_spi_count(uint32_t intid) { return starlte_gic_spi_count(intid); }
+ 
+ /*
+  * The radio driver's options (hakios.brcmfmac.c has a weak one): as there, the boot-arg of the name; but brcmfmac_poll is 1
+@@ -290,20 +295,29 @@ void hakios_virtio_net_init(void) {}
+  * phone with it, and nothing said before the console came up would be seen). wifi_delay=0 starts at once.
+  */
+ void hakios_net_init(void);
++extern void hakios_scsc_start(uint32_t scsc_steps);
+ static void
+ starlte_wifi_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+-	uint32_t steps = 0, delay_s = 60;
++	uint32_t steps = 0, scsc_steps = 0, delay_s = 60;
+ 
+ 	PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps));
++	PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps));
++	if (scsc_steps != 0) {
++		delay_s = 4;
++	}
+ 	PE_parse_boot_argn("wifi_delay", &delay_s, sizeof(delay_s));
++	(void)root_there();
+ 	if (delay_s != 0) {
+-		(void)root_there();
+-		printf("wifi: wifi_pcie=%u: the link is brought up in %u s (wifi_delay)\n", steps, delay_s);
++		printf("wifi: starting in %u s (wifi_delay, scsc_wlan=%u wifi_pcie=%u)\n", delay_s, scsc_steps, steps);
+ 		IOSleep(delay_s * 1000);
+ 	}
+-	printf("wifi: wifi_pcie=%u: en0's options read, then the link (hakios.exynos_pcie.c)\n", steps);
+ 	hakios_net_init();
++	if (scsc_steps != 0) {
++		hakios_scsc_start(scsc_steps);
++		return;
++	}
++	printf("wifi: wifi_pcie=%u: en0's options read, then the link (hakios.exynos_pcie.c)\n", steps);
+ 	hakios_exynos_pcie_init();
+ }
+ 
+@@ -312,29 +326,30 @@ void starlte_wifi_init(void);
+ void
+ starlte_wifi_init(void)
+ {
+-	uint32_t steps = 0;
++	uint32_t steps = 0, scsc_steps = 0;
+ 	thread_t thread;
+ 	DTEntry chosen;
+ 	void const *value;
+ 	unsigned int size;
+ 
+ 	PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps));
++	PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps));
+ 	/*
+ 	 * A test image's network to join (scion-kernel tools/ios27/wifi/adt-wifi-network.py): always taken out of the registry,
+-	 * kept only when the Wi-Fi is on (wifi_pcie=N), for brcmfmac=8. Never logged but for its size.
++	 * kept only when the Wi-Fi is on (wifi_pcie=N or scsc_wlan=N), for step 8. Never logged but for its size.
+ 	 */
+ 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+ 	    SecureDTGetProperty(chosen, "hakios-wifi-network", &value, &size) == kSuccess && size != 0) {
+-		if (steps != 0 && size <= sizeof(dt_network)) {
++		if ((steps != 0 || scsc_steps != 0) && size <= sizeof(dt_network)) {
+ 			memcpy(dt_network, value, size);
+ 			dt_network_length = size;
+ 		}
+ 		starlte_wifi_dt_forget();
+ 		printf("wifi: the device tree names a network to join (%u bytes): %s; taken out of the registry\n", size,
+-		    dt_network_length != 0 ? "kept for brcmfmac=8" : "not kept (wifi_pcie is off, or it is too long)");
++		    dt_network_length != 0 ? "kept for step 8" : "not kept");
+ 	}
+ 
+-	if (steps == 0) {
++	if (steps == 0 && scsc_steps == 0) {
+ 		return;
+ 	}
+ 	if (steps >= 6) {
+diff --git a/bsd/kern/decmpfs.c b/bsd/kern/decmpfs.c
+index 6c9e042..ef75613 100644
+--- a/bsd/kern/decmpfs.c
++++ b/bsd/kern/decmpfs.c
+@@ -628,6 +628,9 @@ decmpfs_fetch_compressed_header(vnode_t vp, decmpfs_cnode *cp, decmpfs_header **
+ 		hdr->uncompressed_size = OSSwapLittleToHostInt64(hdr->uncompressed_size);
+ 	}
+ 
++	if (hdr->compression_magic == 0x66706d63U) {
++		hdr->compression_magic = DECMPFS_MAGIC;
++	}
+ 	if (hdr->compression_magic != DECMPFS_MAGIC) {
+ 		ErrorLogWithPath("invalid compression_magic 0x%08x, should be 0x%08x\n", hdr->compression_magic, DECMPFS_MAGIC);
+ 		err = EINVAL;
+@@ -1364,6 +1367,28 @@ decmpfs_pagein_compressed(struct vnop_pagein_args *ap, int *is_compressed, decmp
+ 	 * or if the file offset isn't page aligned
+ 	 * or the size requested isn't a multiple of PAGE_SIZE
+ 	 */
++	const uint64_t cachedSize16k = cachedSize ? ((cachedSize + 0x3fffULL) & ~0x3fffULL) : 0;
++	if (f_offset >= 0 && (uint64_t)f_offset >= cachedSize && (uint64_t)f_offset < cachedSize16k &&
++	    !(f_offset & PAGE_MASK_64) && !(size & PAGE_MASK) && !(pl_offset & PAGE_MASK)) {
++		/*
++		 * 4 KiB kernel hosting 16 KiB-aligned arm64e userland mappings:
++		 * zero-fill and commit trailing 4 KiB sub-pages within the final 16 KiB userland page.
++		 */
++		kern_return_t zkr = ubc_upl_map(pl, (vm_offset_t *)&data);
++		if (zkr == KERN_SUCCESS && data != NULL) {
++			size_t zlen = MIN(size, (size_t)(cachedSize16k - (uint64_t)f_offset));
++			memset((char *)data + pl_offset, 0, zlen);
++			(void)ubc_upl_unmap(pl);
++			data = NULL;
++			(void)commit_upl(pl, pl_offset, zlen, UPL_COMMIT_FREE_ON_EMPTY, 0);
++			if (zlen < size) {
++				(void)commit_upl(pl, (upl_offset_t)(pl_offset + zlen), size - zlen,
++				    UPL_ABORT_FREE_ON_EMPTY, 1);
++			}
++			err = 0;
++			goto out;
++		}
++	}
+ 	if (f_offset < 0 || f_offset >= cachedSize ||
+ 	    (f_offset & PAGE_MASK_64) || (size & PAGE_MASK) || (pl_offset & PAGE_MASK)) {
+ 		decmpfs_ktriage_record(KTRIAGE_DECMPFS_IVALID_OFFSET, 0);
+@@ -1639,6 +1664,14 @@ decompress:
+ 	upl_unmark_decmp(pl);
+ #endif /* CONFIG_IOSCHED */
+ 
++	if (!err && rounded_uplSize < (user_ssize_t)size && (uint64_t)f_offset < cachedSize16k) {
++		size_t pad16k = MIN(size, (size_t)(cachedSize16k - (uint64_t)f_offset));
++		if ((user_ssize_t)pad16k > rounded_uplSize) {
++			memset((char *)data + pl_offset + rounded_uplSize, 0, pad16k - (size_t)rounded_uplSize);
++			rounded_uplSize = (user_ssize_t)pad16k;
++		}
++	}
++
+ 	kr = ubc_upl_unmap(pl); data = NULL; /* make sure to set data to NULL so we don't try to unmap again below */
+ 	if (kr != KERN_SUCCESS) {
+ 		ErrorLogWithPath("ubc_upl_unmap error %d\n", (int)kr);
+diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+index c1c3929..eeb3a76 100644
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -637,7 +637,11 @@ csblob_get_identity(struct cs_blob *csblob)
+ 		return NULL;
+ 	}
+ 
+-	return ((const char *)cd) + ntohl(cd->identOffset);
++	const char *ident = ((const char *)cd) + ntohl(cd->identOffset);
++	if (strncmp(ident, "cc_fips_test-", 13) == 0) {
++		return "com.apple.cc_fips_test";
++	}
++	return ident;
+ }
+ 
+ /*
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index b21a890..3eba52d 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2819,6 +2819,17 @@ cleanup_rosetta_fp:
+ 			(void) task_suspend_internal(task);
+ 		}
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	if (strcmp(p->p_comm, "atc") == 0 ||
++	    strncmp(p->p_comm, "wirelessinsight", 15) == 0 ||
++	    strcmp(p->p_comm, "milod") == 0 ||
++	    strncmp(p->p_comm, "intelligentrout", 15) == 0 ||
++	    strncmp(p->p_comm, "IDSBlastDoorSer", 15) == 0 ||
++	    strcmp(p->p_comm, "Spotlight") == 0) {
++		/* Park hardware-absent/trimmed KeepAlive daemons before first EL0 instruction so launchd never loops xpcproxy. */
++		(void) task_suspend_internal(task);
++	}
++#endif
+ 
+ 	/*
+ 	 * mark as execed
+@@ -7079,6 +7090,37 @@ exec_extract_strings(struct image_params *imgp)
+ 	}
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	if (imgp->ip_strings != NULL) {
++		static int quiet_bg = -1;
++		if (quiet_bg < 0) {
++			uint32_t q = 1;
++			PE_parse_boot_argn("a21s_quiet_bg", &q, sizeof(q));
++			quiet_bg = (int)q;
++		}
++		if (quiet_bg > 0) {
++			const char *epath = imgp->ip_strings + strlen(EXECUTABLE_KEY);
++			const char *ename = strrchr(epath, '/');
++			ename = ename != NULL ? ename + 1 : epath;
++			if (strcmp(ename, "seputil") == 0 || strcmp(ename, "keybagd") == 0) {
++				extern void a21s_fix_var_owners(void);
++				a21s_fix_var_owners();
++			}
++			if (strcmp(ename, "pivtoken") == 0 ||
++			    strcmp(ename, "secelemtoken") == 0 ||
++			    strcmp(ename, "CalculatorWidget") == 0 ||
++			    strcmp(ename, "WorldClockWidget") == 0 ||
++			    strncmp(ename, "ContactsCoreSpot", 16) == 0 ||
++			    strncmp(ename, "MobileTimerInten", 16) == 0 ||
++			    strncmp(ename, "PassKitSpotlight", 16) == 0 ||
++			    strncmp(ename, "SettingsImportEx", 16) == 0 ||
++			    strncmp(ename, "ScreenTimeWidget", 16) == 0 ||
++			    strnstr(ename, "SpotlightIndex", 64) != NULL ||
++			    strncmp(ename, "com.apple.mobile.", 17) == 0) {
++				error = ENOENT;
++				goto bad;
++			}
++		}
++	}
+ 	/* one more variable for the programs that get a library inserted (sweet_exec_inject_env) */
+ 	if (sweet_exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
+ 		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+index 7eecaca..231a2f9 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -533,8 +533,8 @@ static const struct {
+ static int
+ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
+ {
+-	/* iOS 27 on STARLTE: SpringBoard sets kern.darkboot (PRIV_DARKBOOT) at start */
+-	if (priv == PRIV_WORK_INTERVAL || priv == PRIV_DARKBOOT) {
++	/* iOS 27 on STARLTE: SpringBoard sets kern.darkboot (PRIV_DARKBOOT) at start; lsd needs PRIV_PROC_CPUMON_OVERRIDE */
++	if (priv == PRIV_WORK_INTERVAL || priv == PRIV_DARKBOOT || priv == PRIV_PROC_CPUMON_OVERRIDE) {
+ 		return 0;
+ 	}
+ 	if (sweet_priv_ent) {
+diff --git a/bsd/sys/hakios.exynos_abox.h b/bsd/sys/hakios.exynos_abox.h
+index d856666..36f3fbf 100644
+--- a/bsd/sys/hakios.exynos_abox.h
++++ b/bsd/sys/hakios.exynos_abox.h
+@@ -74,24 +74,26 @@ bool hakios_abox_headphones(bool on);
+ #define ABOX_PMU_PA             ((uint32_t)EXYNOS_PMU_PA)     /* the PMU (system-controller@14060000) */
+ /* abox_rmem (the device tree's reserved-memory for ABOX, 0xFB200000 + 0x2800000): below 4 GB, kept out of UEFI and XNU
+  * by the loader (starlte's keep_out); the ring goes at its start when no RAM below 4 GB is the kernel's */
+-#define ABOX_RMEM_PA            0xFB200000u
++#define ABOX_RMEM_PA            0xE6C00000u
+ #define ABOX_RMEM_SIZE          0x02800000u
+ #define ABOX_DTZPC_ARG          EXYNOS_ABOX_ABOX_DTZPC_ARG     /* pd-aud's need_smc: the DTZPC restore's argument */
+ 
+ /*
+- * ---- PMU (FACT) -----------------------------------------------------------------------------------------------------------
+- * cal-if/exynos9810/flexpmu_cal_local_exynos9810.h (aud_on, aud_off) and abox.c (the CONFIG_SOC_EXYNOS9810 block)
++ * ---- PMU (FACT: Exynos 850 / S5E3830 aud_on + abox_runtime_resume) --------------------------------------------------------
+  */
+-#define PMU_AUD_CONFIGURATION   EXYNOS_ABOX_PMU_AUD_CONFIGURATION          /* [3:0] = 0xF on, 0 off */
+-#define PMU_AUD_STATUS          EXYNOS_ABOX_PMU_AUD_STATUS          /* [3:0] == 0xF when on, 0 when off */
+-#define PMU_GPIO_MODE_ABOX      EXYNOS_ABOX_PMU_GPIO_MODE_ABOX          /* GPIO_MODE_ABOX_SYS_PWR_REG: bit 0, set by abox_pad_retention() both ways */
+-#define PMU_PAD_RETENTION_ABOX  EXYNOS_ABOX_PMU_PAD_RETENTION_ABOX          /* PAD_RETENTION_ABOX_OPTION: bit 28 set releases the pads' retention */
+-#define PMU_PAD_RELEASE         (1u << 28)
+-#define PMU_ABOX_CPU_CONFIG     EXYNOS_ABOX_PMU_ABOX_CPU_CONFIG          /* ABOX_CPU_CONFIGURATION: bit 0 the CPU's local power */
+-#define PMU_ABOX_CPU_STATUS     EXYNOS_ABOX_PMU_ABOX_CPU_STATUS          /* bit 0: the CPU's power is on */
+-#define PMU_ABOX_CPU_OPTION     EXYNOS_ABOX_PMU_ABOX_CPU_OPTION          /* bit 28: the CPU released (ENABLE_CPU) */
++#define PMU_AUD_CONFIGURATION   EXYNOS_ABOX_PMU_AUD_CONFIGURATION          /* [0] = 0x1 on, 0 off */
++#define PMU_AUD_STATUS          EXYNOS_ABOX_PMU_AUD_STATUS          /* [0] == 0x1 when on, 0 when off */
++#define PMU_AUD_MASK            0x1u
++#define PMU_GPIO_MODE_ABOX      EXYNOS_ABOX_PMU_GPIO_MODE_ABOX
++#define PMU_PAD_RETENTION_ABOX  EXYNOS_ABOX_PMU_PAD_RETENTION_ABOX          /* PAD_RETENTION_AUD_OPTION (0x20A0): bit 11 releases retention */
++#define PMU_PAD_RELEASE         (1u << 11)
++#define PMU_ABOX_CPU_CONFIG     EXYNOS_ABOX_PMU_ABOX_CPU_CONFIG          /* ABOX_CPU0_CONFIGURATION: bit 0 */
++#define PMU_ABOX_CPU_STATUS     EXYNOS_ABOX_PMU_ABOX_CPU_STATUS          /* bit 0 */
++#define PMU_ABOX_CPU_OPTION     EXYNOS_ABOX_PMU_ABOX_CPU_OPTION          /* bit 0: ENABLE_CPU */
+ #define PMU_ABOX_CPU_ENABLE     EXYNOS_ABOX_PMU_ABOX_CPU_ENABLE
+-#define PMU_ABOX_CPU_STANDBY    EXYNOS_ABOX_PMU_ABOX_CPU_STANDBY          /* bit 29 WFE, bit 28 WFI */
++#define PMU_ABOX_CPU_STANDBY    EXYNOS_ABOX_PMU_ABOX_CPU_STANDBY
++#define PMU_ABOX_CPU1_CONFIG    0x2E00u
++#define PMU_ABOX_CPU1_OPTION    0x2E20u
+ /* After AUD_STATUS reads on, the CAL makes SMC 0x82000410 (SMC_CMD_PREAPRE_PD_ONOFF, linux/smc.h) with (1, 0x17C10204):
+  * the DTZPC restore (exynos-el3_mon.c, exynos_pd_tz_restore), before any of the block's registers is touched. */
+ #define ABOX_SMC_PD_ONOFF       0x82000410u
+@@ -102,55 +104,51 @@ bool hakios_abox_headphones(bool on);
+  * table has M 45, P 1, S 0, K 24319: 1179.648040 MHz (abox.h AUD_PLL_RATE_HZ_FOR_48000).
+  */
+ #define CMU_PLL_LOCKTIME        EXYNOS_ABOX_CMU_PLL_LOCKTIME          /* [19:0]: P x 500 for a PLL with K (pll_spec.c: PLL_1031X flock_time 500) */
+-#define CMU_PLL_CON0            EXYNOS_ABOX_CMU_PLL_CON0          /* S [2:0], P [13:8], M [25:16], MUX_SEL 4, MUX_BUSY 7, STABLE 29, ENABLE 31 */
+-#define CMU_PLL_CON3            EXYNOS_ABOX_CMU_PLL_CON3          /* K [15:0], signed */
+-#define PLL_MUX_SEL             (1u << 4)       /* 1: the PLL's output, 0: OSCCLK (ra.h) */
++#define CMU_PLL_CON0            EXYNOS_ABOX_CMU_PLL_CON0          /* Exynos 850 PLL_CON3_PLL_AUD (+0x10c): S [2:0], P [13:8], M [25:16], STABLE 29, ENABLE 31 */
++#define CMU_PLL_CON3            EXYNOS_ABOX_CMU_PLL_CON3          /* Exynos 850 PLL_CON5_PLL_AUD (+0x114): K [15:0], signed */
++#define PLL_MUX_SEL             0u              /* Exynos 850: PLL_CON3 (+0x10c) has no MUX_SEL at bit 4 (reads 0) */
+ #define PLL_MUX_BUSY            (1u << 7)
+ #define PLL_STABLE              (1u << 29)
+ #define PLL_ENABLE              (1u << 31)
+-#define PLL_AUD_M               45u
+-#define PLL_AUD_P               1u
++#define PLL_AUD_M               119u
++#define PLL_AUD_P               3u
+ #define PLL_AUD_S               0u
+-#define PLL_AUD_K               24319u
++#define PLL_AUD_K               6494u
+ #define PLL_AUD_LOCK            500u
+ /* dividers: DIVRATIO (the ratio less one) in the low bits, BUSY bit 16, ENABLE_AUTOMATIC_CLKGATING bit 28 */
+ #define CMU_DIV_AUDIF           EXYNOS_ABOX_CMU_DIV_AUDIF          /* [8:0] DIV_CLK_AUD_AUDIF from PLL_AUD: abox's "audif" */
+-#define CMU_DIV_BUS             EXYNOS_ABOX_CMU_DIV_BUS          /* [2:0] DIV_CLK_AUD_BUS from PLL_AUD: ABOX's ACLK, abox's "bus" */
+-#define CMU_DIV_BUSP            EXYNOS_ABOX_CMU_DIV_BUSP          /* [1:0] DIV_CLK_AUD_BUSP from DIV_CLK_AUD_BUS: the block's APB */
+-#define CMU_DIV_PLL             EXYNOS_ABOX_CMU_DIV_PLL          /* [3:0] DIV_CLK_AUD_PLL: toward the CPU's clock (not touched) */
+-#define CMU_DIV_UAIF1           EXYNOS_ABOX_CMU_DIV_UAIF1          /* [8:0] DIV_CLK_AUD_UAIF1 from DIV_CLK_AUD_AUDIF: UAIF1's BCLK */
++#define CMU_DIV_BUS             EXYNOS_ABOX_CMU_DIV_BUS          /* [3:0] DIV_CLK_AUD_BUSD from PLL_AUD: ABOX's ACLK */
++#define CMU_DIV_BUSP            EXYNOS_ABOX_CMU_DIV_BUSP          /* [3:0] DIV_CLK_AUD_BUSP from PLL_AUD: the block's APB */
++#define CMU_DIV_PLL             EXYNOS_ABOX_CMU_DIV_PLL          /* [3:0] DIV_CLK_AUD_CPU */
++#define CMU_DIV_UAIF1           EXYNOS_ABOX_CMU_DIV_UAIF1          /* [9:0] DIV_CLK_AUD_UAIF1 from DIV_CLK_AUD_AUDIF: UAIF1's BCLK */
+ #define CMU_MUX_CPU             EXYNOS_ABOX_CMU_MUX_CPU          /* MUX_CLK_AUD_CPU (not touched) */
+-#define CMU_MUX_UAIF1           EXYNOS_ABOX_CMU_MUX_UAIF1          /* [0]: 0 DIV_CLK_AUD_UAIF1, 1 CLKIO_AUD_UAIF1 (the pin); BUSY 16 */
++#define CMU_MUX_UAIF1           EXYNOS_ABOX_CMU_MUX_UAIF1          /* [0]: 0 DIV_CLK_AUD_UAIF1, 1 IOCLK_AUDIOCDCLK1; BUSY 16 */
+ #define CMU_DIV_BUSY            EXYNOS_ABOX_CMU_DIV_BUSY
+-/* rates: the CAL's common table for BLK_AUD (cmucal-vclklut.c blk_aud_lut_params) has DIV_CLK_AUD_BUS 1, BUSP 2; abox.c's
+- * abox_register_bclk_usage() with uaif_max_div 512 (device tree) asks AUDIF for 384000 x 96 x 2 = 73.728 MHz (ratio 16), and
+- * abox_if.c BCLK = rate x channels x width = 1.536 MHz (ratio 48 under AUDIF) */
+-#define AUD_DIV_BUS             1u              /* 589.824 MHz */
+-#define AUD_DIV_BUSP            2u              /* 196.608 MHz */
+-#define AUD_DIV_AUDIF           15u             /* 73.728 MHz */
+-#define AUD_DIV_UAIF1           47u             /* 1.536 MHz */
+-/* gates of UAIF1 (CG_VAL 21, MANUAL 20, ENABLE_AUTOMATIC_CLKGATING 28): read, not written */
+-#define CMU_GATE_BCLK_UAIF1     0x2020
+-#define CMU_GATE_RSTN_UAIF1     0x2094
+-/* Q-channels: ENABLE bit 0 (1: the hardware gates the clock by itself), CLOCK_REQ bit 1 (with ENABLE 0: 1 = clock on),
+- * IGNORE_FORCE_PM_EN bit 2, EXPIRE_VAL [25:16]. ra.c ra_req_enable_qch(): a clk_enable sets CLOCK_REQ only when ENABLE is 0 */
+-#define CMU_QCH_DUMMY           0x3000          /* ABOX_QCH_DUMMY: abox's "cpu" clock (GATE_ABOX_DUMMY) */
+-#define CMU_QCH_ACLK            0x3024          /* ABOX_QCH_ACLK (no Linux driver enables it) */
+-#define CMU_QCH_BCLK1           0x302C          /* ABOX_QCH_BCLK1: UAIF1's "bclk_gate" (GATE_ABOX_BCLK1) */
+-#define CMU_QCH_GPIO            0x304C          /* GPIO_AUD_QCH */
+-#define CMU_QCH_SYSMMU          0x3060          /* SYSMMU_AUD_QCH: the SysMMU's "aclk" (GATE_SMMU_ABOX) */
++/* Exynos 850 rates under PLL_AUD = 1,032,192,118 Hz (14 x 73.728 MHz) */
++#define AUD_DIV_BUS             1u              /* /2 = 516.096 MHz */
++#define AUD_DIV_BUSP            5u              /* /6 = 172.032 MHz */
++#define AUD_DIV_AUDIF           13u             /* /14 = 73.728 MHz */
++#define AUD_DIV_UAIF1           47u             /* /48 = 1.536 MHz */
++/* Q-channels on Exynos 850 CMU_AUD (0x14A00000) */
++#define CMU_QCH_DUMMY           0x3000          /* ABOX_QCH_CPU */
++#define CMU_QCH_ACLK            0x3010          /* ABOX_QCH_ACLK */
++#define CMU_QCH_BCLK1           0x3018          /* ABOX_QCH_BCLK1 */
++#define CMU_QCH_CCLK_ASB        0x3034          /* ABOX_QCH_CCLK_ASB */
++#define CMU_QCH_GPIO            0x3040          /* GPIO_AUD_QCH */
++#define CMU_QCH_SYSMMU          0x3060          /* SYSMMU_AUD_QCH_S1 */
+ #define QCH_ENABLE              (1u << 0)
+ #define QCH_CLOCK_REQ           (1u << 1)
+ #define CMU_CONTROLLER_OPTION   0x0800          /* [29:28] kept by the CAL across power-down (aud_save) */
+-#define CMU_HCHGEN_CLKMUX       0x0850
++#define CMU_HCHGEN_CLKMUX       0x0600          /* MUX_CLKCMU_AUD_CPU_USER */
+ 
+ /*
+- * ---- SYSREG_AUD (FACT: abox.h, abox.c abox_enable(); flexpmu aud_save) ----------------------------------------------------
++ * ---- SYSREG_AUD (FACT: Exynos 850 abox_runtime_resume) --------------------------------------------------------------------
+  */
+-#define SYSREG_DRCG_EN          0x0104          /* BUS_COMPONENT_DRCG_EN (kept by the CAL across power-down) */
+-#define SYSREG_SNPS_EMA         0x0300
+-#define SYSREG_L2_CACHE_CON     0x0328          /* only with the "share vts sram" quirk, which the S9 has not */
+-#define SYSREG_MISC_CON         0x032C          /* abox_enable() writes 1 before anything else; what bit 0 does is not said */
++#define SYSREG_DRCG_EN          0x0104          /* BUS_COMPONENT_DRCG_EN */
++#define SYSREG_MISC_CON0        0x0600          /* abox_runtime_resume writes 1 */
++#define SYSREG_MISC_STAT0       0x0604
++#define SYSREG_MISC_STAT1       0x0628
++#define SYSREG_MISC_CON1        0x0640          /* abox_runtime_resume writes 1 */
+ 
+ /*
+  * ---- GPIO_AUD, bank gpb1 (FACT: pinctrl-exynos.c exynos9810_pin_banks1, bank_type_6; the device tree's aud-i2s1-bus) -----
+@@ -205,18 +203,17 @@ bool hakios_abox_headphones(bool on);
+ #define ROUTE_SIFS1             2u
+ #define ABOX_ROUTE_CTRL1        0x0044          /* NSRCn [4n+3:4n], SPUSM [19:16] */
+ #define ABOX_ROUTE_CTRL2        0x0048          /* RSRCn [4n+3:4n]: 1..3 SIFS0..2, 8..11 NSRC0..3 */
+-#define ABOX_SPUS_CTRL0         0x0200          /* chain n at [4n+3:4n]: IN bit 3 (0 RDMAn, 1 SIFSM), OUT [2:1] (0 SIFS1,
+-                                                 * 1 SIFS0, 2 SIFS2), ASRC bit 0 (off/on) */
+-#define SPUS_CHAIN_MASK         0xFu
+-#define SPUS_IN_SIFSM           (1u << 3)
+-#define SPUS_OUT_SIFS1          (0u << 1)
++#define ABOX_SPUS_CTRL0         0x0200          /* ABOX v2.3: chain 0 at [7:0]: IN [6:5] (0 RDMA0), OUT [4:1] (1 SIFS0,
++                                                 * 2 SIFS1), ASRC bit 0 (off/on) */
++#define SPUS_CHAIN_MASK         0xFFu
++#define SPUS_IN_SIFSM           (1u << 5)
+ #define SPUS_OUT_SIFS0          (1u << 1)
++#define SPUS_OUT_SIFS1          (2u << 1)
+ #define SPUS_ASRC_ON            (1u << 0)
+-#define ABOX_SPUS_CTRL1         0x0204          /* MIXP_FORMAT [4:0] (SIFS0, the mixer), SIFS_OUT1_SEL [18:16] (SPUS OUTn),
+-                                                 * SIFS_OUT2_SEL [21:19], SIFM_IN_SEL [24:22] */
++#define ABOX_SPUS_CTRL1         0x0204          /* ABOX v2.3: MIXP_FORMAT [4:0] (SIFS0), SIFS_OUT1_SEL [15:12] (0 SPUS OUT0) */
+ #define SPUS_MIXP_FORMAT_MASK   0x1Fu
+-#define SPUS_SIFS1_SEL_SHIFT    16
+-#define SPUS_SIFS1_SEL_MASK     (7u << 16)
++#define SPUS_SIFS1_SEL_SHIFT    12
++#define SPUS_SIFS1_SEL_MASK     (0xFu << 12)
+ #define ABOX_SPUS_CTRL2         0x0208          /* MIXP_FLUSH bit 0: written 1 before the mixer comes up and after it goes */
+ #define ABOX_SPUS_CTRL3         0x020C          /* SIFS1_FLUSH 0, SIFS2_FLUSH 1, SIFM_FLUSH 2 */
+ #define ABOX_SPUS_SIFS_CNT0     0x0280          /* SIFS0/1 counts: only for SIFS looped to NSRC (capture) */
+@@ -313,7 +310,8 @@ bool hakios_abox_headphones(bool on);
+ #define RDMA_BURST_MASK         (0xFu << RDMA_BURST_SHIFT)
+ #define RDMA_VOL_MASK           0xFFFFFFu
+ #define RDMA_PROGRESS           (1u << 31)
+-#define RDMA_RBUF_OFFSET(s)     ((((s) >> 16) & 0x1FFFu) << 4)
+-#define RDMA_RBUF_CNT(s)        ((s) & 0x1FFFu)
++#define RDMA_RBUF_PERIOD(s)     (((s) >> 20) & 0xFFu)
++#define RDMA_RBUF_OFFSET(s)     (RDMA_RBUF_PERIOD(s) * 2048u)
++#define RDMA_RBUF_CNT(s)        ((s) & 0xFFFFFu)
+ 
+ #endif /* _SYS_HAKIOS_EXYNOS_ABOX_H_ */
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 7a10982..8422994 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -57,9 +57,10 @@ starlte_m3_pmu_defaults(void)
+ 		{ 0x2114, 3, 2 }, { 0x2180, 3, 2 }, { 0x21ec, 3, 2 }, { 0x2258, 3, 2 },
+ 		{ 0x2384, 3, 2 },
+ 	};
++	return; /* Exynos 850 has 8x Cortex-A55 cores, no Mongoose M3 PMU sequence */
+ 	static vm_offset_t pmu;
+ 	if (pmu == 0) {
+-		pmu = ml_io_map(0x14060000u, 0x3000);
++		pmu = 0;
+ 	}
+ 	for (unsigned int i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
+ 		volatile uint32_t *r = (volatile uint32_t *)(pmu + seq[i].offset);
+@@ -132,13 +133,8 @@ SweetCPU::start(IOService *provider)
+ 		return false;
+ 	}
+ #if defined(STARLTE)
+-	/* Logical 0..3 = Cortex-A55 cores; MPIDR_EL1 Aff1 = core (0x81000n00),
+-	 * measured with starsmpprobe=1 (mkadt_starlte.py). Logical 4..7 = the
+-	 * Mongoose M3 cores, MPIDR 0x100+n without MT, reg 0x10100+n (start.s
+-	 * adds bit 16 for cores without the MT bit). */
+-	uint32_t expected_mpidr = cpu->cpu_id < 4 ? cpu->cpu_id << 8 :
+-	    cpu->cpu_id < 8 ? 0x10100u + cpu->cpu_id - 4 : ~0u;
+-	if (cpu->phys_id != expected_mpidr || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
++	bool valid_mpidr = (cpu->phys_id <= 0x003u) || (cpu->phys_id >= 0x100u && cpu->phys_id <= 0x103u);
++	if (!valid_mpidr || topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic(CPU_PORT_NAME " CPU: unsupported topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+ 	}
+@@ -169,7 +165,9 @@ SweetCPU::start(IOService *provider)
+ 		return false;
+ 	}
+ #if defined(A5XELTE)
+-#if defined(HEROLTE)
++#if defined(STARLTE)
++	cpuName = OSSymbol::withCStringNoCopy("Cortex-A55");
++#elif defined(HEROLTE)
+ 	cpuName = OSSymbol::withCStringNoCopy(cpu->cpu_id < 4 ? "Cortex-A53" : "Mongoose");
+ #else
+ 	cpuName = OSSymbol::withCStringNoCopy("Cortex-A53");
+@@ -240,10 +238,9 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 	}
+ 	/* Both current ADTs describe CPU0 as the boot CPU. */
+ #if defined(A5XELTE)
+-	if (topology->boot_cpu->cpu_id != 0 ||
+-	    topology->boot_cpu->phys_id != A5XELTE_BOOT_MPIDR) {
+-		panic(CPU_PORT_NAME " CPU: expected boot MPIDR 0x%x and logical CPU 0",
+-		    A5XELTE_BOOT_MPIDR);
++	if (topology->boot_cpu->cpu_id != 0) {
++		panic(CPU_PORT_NAME " CPU: expected logical CPU 0 for boot MPIDR 0x%x",
++		    topology->boot_cpu->phys_id);
+ #else
+ 	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0) {
+ 		panic(CPU_PORT_NAME " CPU: expected boot MPIDR 0 and logical CPU 0");
+@@ -395,7 +392,7 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 	const ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[getCPUNumber()];
+ 	/* cpu_start() passes NULL,NULL: x20/x21 are set by LowResetVectorBase. */
+ #if defined(A5XELTE)
+-	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == A5XELTE_BOOT_MPIDR ||
++	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == ml_get_topology_info()->boot_cpu->phys_id ||
+ #else
+ 	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == 0 ||
+ #endif
+@@ -429,14 +426,8 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 	    getCPUNumber(), cpu->phys_id, (uint64_t)entry, getCPUNumber());
+ 	__builtin_arm_dsb(DSB_SY);
+ #if defined(STARLTE)
+-	/* The S9's PSCI 0.1 firmware numbers the A55 cores 1..3 (the vendor DTB
+-	 * reg), while the cores read MPIDR Aff1 = n (starsmpprobe=1). The M3
+-	 * cores are PSCI 0x100..0x103 and need the vendor PMU defaults first. */
+-	uint64_t target = cpu->phys_id >> 8;
+-	if (cpu->phys_id & 0x10000) {
+-		target = cpu->phys_id & 0xffff;
+-		starlte_m3_pmu_defaults();
+-	}
++	/* Exynos 850 PSCI 1.0 CPU_ON target_cpu = normalized Aff2:Aff1 (0x000..0x003, 0x100..0x103). */
++	uint64_t target = cpu->phys_id;
+ 	int32_t rc = sweet_psci_cpu_on(target, entry, getCPUNumber());
+ #else
+ 	int32_t rc = sweet_psci_cpu_on(cpu->phys_id, entry, getCPUNumber());
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 706488b..9de05b3 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -565,18 +565,15 @@ AppleCLCD::start(IOService *provider)
+ 	 * of its own, and when it was the panel's top-left part every other
+ 	 * frame landed on the panel unscaled (iPadOS 18 boot52: the doubled
+ 	 * band above the scaled picture). */
+-	fSurface = fScaled ? sweet_surface_create_buffer(fLogicalW, fLogicalH, SWEET_FB_FORMAT_BGRA) :
+-	    sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+-	fPixels = fSurface != NULL && !fScaled ? fSurface->kernelAddress() : 0;
+-	/* Scaled, scaledCopy() writes the whole panel, so it needs a mapping of
+-	 * all of it (with the panel's top-left part as the default surface, the
+-	 * lower rows went past its end: black lower third and stray writes, seen
+-	 * on the S9). */
+-	if (fScaled && fSurface != NULL) {
++	/* Always use an offscreen buffer for fSurface so CoreAnimation never clears or
++	 * draws intermediate passes directly into the live DECON scanout buffer (fPhys). */
++	fSurface = sweet_surface_create_buffer(fLogicalW, fLogicalH, SWEET_FB_FORMAT_BGRA);
++	fPixels = 0;
++	if (fSurface != NULL) {
+ 		SweetSurface *panel = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes,
+ 		    SWEET_FB_FORMAT_BGRA);
+ 		fPixels = panel != NULL ? panel->kernelAddress() : 0;
+-		IOLog("SWEET FB: scaled: panel mapping %ux%u for the scaler\n", fWidth, fHeight);
++		IOLog("SWEET FB: double-buffered panel mapping %ux%u at 0x%llx\n", fWidth, fHeight, fPhys);
+ 	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	sweet_fb_scan_base = fPixels;
+@@ -685,7 +682,7 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+ 	sweet_fb_sbx = sweet_speed_flags();
+-	hakios_s6e3ha8_init();
++	/* Exynos 850 uses HX83112A DSI LCD, not S9's S6E3HA8 (which causes an SError on 0x14870000). */
+ #endif
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+@@ -1133,6 +1130,17 @@ sweet_fb_copy_band(const struct sweet_fb_copy_job *job, uint32_t band, uint32_t
+ {
+ 	int32_t first = (int32_t)((int64_t)job->rows * band / bands);
+ 	int32_t last = (int32_t)((int64_t)job->rows * (band + 1) / bands);
++	/* Mali-G52 is not IO-coherent (COHERENCY_FEATURES=0) and SWEET_MTL2_FLUSH=2 skips
++	 * post-render DC CIVAC on swap-chain surfaces: invalidate our band's CPU cache lines
++	 * in parallel before reading DRAM into the write-combined DECON scanout buffer. */
++	if (first < last && job->rowBytes != 0) {
++		uintptr_t s0 = (job->src + (uint64_t)first * job->srcStride) & ~(uintptr_t)63;
++		uintptr_t s1 = job->src + (uint64_t)(last - 1) * job->srcStride + job->rowBytes;
++		for (uintptr_t p = s0; p < s1; p += 64) {
++			__asm__ volatile ("dc civac, %0" : : "r" (p) : "memory");
++		}
++		__asm__ volatile ("dsb ish" ::: "memory");
++	}
+ 	for (int32_t y = first; y < last; y++) {
+ 		memcpy((void *)(job->dst + (uint64_t)y * job->dstStride),
+ 		    (const void *)(job->src + (uint64_t)y * job->srcStride), job->rowBytes);
+@@ -1579,8 +1587,7 @@ AppleCLCD::present(const uint8_t *rec)
+ 			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+-		if (s == NULL || (s == fSurface && !fScaled)) {
+-			OSSafeReleaseNULL(s);
++		if (s == NULL) {
+ 			continue;
+ 		}
+ 		uintptr_t src = s->kernelAddress();
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 35091fa..e5a100c 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -357,7 +357,7 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
+  * (_UIEventHIDTouchEdgeTypeForHIDEvent); without it there is no home or
+  * app-switcher gesture.
+  */
+-#define SWEET_TOUCH_EDGE_PX 48
++#define SWEET_TOUCH_EDGE_PX 36
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+@@ -490,24 +490,21 @@ SweetHIDTouch::start(IOService *provider)
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	/* starlte_touch.c reports 1440x2960 panel pixels, as AppleCLCD. */
+-	fPanelW = 1440;
+-	fPanelH = 2960;
+-	fLogicalW = native ? 1440 : 1125;
+-	fLogicalH = native ? 2960 : 2436;
+-	/* sweetfb_scale + sweetfb_lw/lh: the canvas is drawn full height and
+-	 * centred between black bars (SweetFramebuffer.cpp scaledCopy);
+-	 * normalize over that strip, in panel pixels. */
++	/* Galaxy A21s HX83112A reports 720x1600 panel pixels (0..719, 0..1599). */
++	fPanelW = 720;
++	fPanelH = 1600;
++	fLogicalW = native ? 720 : 1125;
++	fLogicalH = native ? 1600 : 2436;
+ 	int scale = 0;
+ 	uint32_t lw = 0, lh = 0;
+ 	if (PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale)) && scale &&
+ 	    PE_parse_boot_argn("sweetfb_lw", &lw, sizeof(lw)) &&
+ 	    PE_parse_boot_argn("sweetfb_lh", &lh, sizeof(lh)) && lw && lh) {
+-		fLogicalH = 2960;
+-		fLogicalW = (int)((uint64_t)lw * 2960 / lh);
+-		if (fLogicalW > 1440) {
+-			fLogicalW = 1440;
+-			fLogicalH = (int)((uint64_t)lh * 1440 / lw);
++		fLogicalH = 1600;
++		fLogicalW = (int)((uint64_t)lw * 1600 / lh);
++		if (fLogicalW > 720) {
++			fLogicalW = 720;
++			fLogicalH = (int)((uint64_t)lh * 720 / lw);
+ 		}
+ 	}
+ #elif defined(ARM64_BOARD_CONFIG_HEROLTE)
+@@ -546,8 +543,8 @@ SweetHIDTouch::start(IOService *provider)
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	setProperty("SurfaceWidth", (unsigned long long)(64 << 16), 32);	/* mm, 16.16 */
+-	setProperty("SurfaceHeight", (unsigned long long)(132 << 16), 32);
++	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 (A21s 6.5" 20:9) */
++	setProperty("SurfaceHeight", (unsigned long long)(151 << 16), 32);
+ #elif defined(ARM64_BOARD_CONFIG_HEROLTE)
+ 	setProperty("SurfaceWidth", (unsigned long long)(64 << 16), 32);	/* mm, 16.16 */
+ 	setProperty("SurfaceHeight", (unsigned long long)(113 << 16), 32);
+@@ -614,7 +611,8 @@ SweetHIDTouch::start(IOService *provider)
+ 		IOLog("SWEET HID: touch registered as an absolute pointer (macOS): %dx%d panel, %dx%d shown strip at %d,%d; "
+ 		    "scroll %d px/line\n", fPanelW, fPanelH, fLogicalW, fLogicalH, -fOffX, -fOffY, fScrollStep);
+ 	} else {
+-		IOLog("SWEET HID: touch registered\n");
++		IOLog("SWEET HID: touch registered (%dx%d panel, %dx%d logical, edge %d px)\n",
++		    fPanelW, fPanelH, fLogicalW, fLogicalH, SWEET_TOUCH_EDGE_PX);
+ 	}
+ 	return true;
+ }
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index d1bbd4b..52cb72c 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -803,63 +803,31 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-	/* Exynos 9810: GPIO keys with S9 pins (a5xelte_keys.c) and the
+-	 * S6SY761 touch driver (starlte_touch.c); no S7 PMIC/GPU code.
+-	 * Boot-arg ufsprobe=1: read-only UFS host state and LUN 0 GPT. */
++	/* Galaxy A21s (SM-A217F, Exynos 850): Core-0 HX83112A touch/keys + Mali-G52 MP1 + Audio + Modem */
+ 	{
++		extern void a21s_logdump_sync(const char *tag);
+ 		extern void starlte_brand_banner(bool full);
+-		starlte_brand_banner(true);
+-	}
+-	a5xelte_keys_init();
+-	{
+ 		extern void starlte_touch_probe(void);
+-		starlte_touch_probe();
+-		/* Boot-arg tmu=1|2: the TMU's temperatures, read only (bsd/dev/hakios.exynos_tmu.c), before the
+-		 * governor that reads them; off: nothing mapped, nothing read. */
+-		extern void hakios_exynos_tmu_start(void);
+-		hakios_exynos_tmu_start();
+-		/* Boot-arg cpufreq_gov=1: the CPU governor (bsd/dev/hakios.exynos_cpufreq.c); off: nothing. */
+-		extern bool hakios_exynos_cpufreq_gov_start(void);
+-		(void)hakios_exynos_cpufreq_gov_start();
+-		/* Boot-arg wifi_pcie=N (1-5): Scion's Wi-Fi stage 1, PCIe channel 0 to the BCM4361 (bsd/dev/hakios.exynos_pcie.c). */
+-		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
+ 		extern void hakios_extra_ram_canary_start(void);
+-		hakios_extra_ram_canary_start();
+-		extern void starlte_wifi_init(void);
+-		starlte_wifi_init();       /* wifi_pcie=N: en0's options, then the link and (6) brcmfmac (bsd/dev/starlte_wifi.c) */
+-		/* Boot-arg cam_s9=N: Scion's front camera driver (bsd/dev/hakios.exynos_camera.c; its lens with cam_af=N,
+-		 * bsd/dev/hakios.ak737x.c); off: nothing mapped, nothing powered. */
+-		extern void hakios_exynos_camera_init(void);
+-		hakios_exynos_camera_init();
+-		/* Boot-arg shub=N: Scion's driver for the sensor hub (bsd/dev/hakios.ssp.c: the accelerometer, gyroscope and
+-		 * the others behind the BCM4775's hub, /dev/hakios-sensors); off: nothing mapped, nothing powered. */
+-		extern void hakios_ssp_init(void);
+-		hakios_ssp_init();
+-		/* Boot-arg cp=N: Scion's driver of the S9's own modem, the Shannon CP (bsd/dev/hakios.shannon.c): 1 a look,
+-		 * 2 its image loaded from RADIO and checked by the secure world, 3 started, 4 the link; off: nothing. */
+-		extern void hakios_shannon_init(void);
+-		hakios_shannon_init();
+-		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
+-		extern void hakios_exynos_dpu_boot_probe(void);
+-		hakios_exynos_dpu_boot_probe();
+-		/* Boot-arg bt=N (1-7): Scion's S9 Bluetooth, BCM4361 on UART_BT (bsd/dev/hakios.bcm4361_bt.c); off: nothing. */
+-		extern void hakios_bcm4361_bt_init(void);
+-		hakios_bcm4361_bt_init();
+-		/* Boot-arg max98512=N (1-3): Scion's S9 speaker amplifiers (bsd/dev/hakios.max98512.c); off: nothing. */
++		extern void starlte_gpu_probe(void);
+ 		extern void hakios_max98512_init(void);
+-		hakios_max98512_init();
+-		/* Boot-arg cs47l93=N (1-6): Scion's S9 CS47L93 codec (bsd/dev/hakios.cs47l93.c); headphone OUT2 and mic IN3L. */
+-		extern void hakios_cs47l93_init(void);
+-		hakios_cs47l93_init();
+-		/* Boot-arg abox=N (1-8): Scion's S9 ABOX speaker path, and at 8 /dev/hakios-audio (bsd/dev/hakios.exynos_abox.c);
+-		 * off: nothing mapped or written. */
+ 		extern void hakios_exynos_abox_init(void);
+-		hakios_exynos_abox_init();
+-		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
+-		starlte_smp_probe();
+-		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
+-		extern void starlte_gpu_probe(void);
++		extern void hakios_shannon_init(void);
++		extern void starlte_wifi_init(void);
++
++		starlte_brand_banner(true);
++		a21s_logdump_sync("IOKIT_PRE_PROBES");
++		a5xelte_keys_init();
++		starlte_touch_probe();
++		hakios_extra_ram_canary_start();
++		starlte_wifi_init();
++		a21s_logdump_sync("IOKIT_PRE_GPU");
+ 		starlte_gpu_probe();
++		a21s_logdump_sync("IOKIT_POST_GPU");
++		hakios_max98512_init();
++		hakios_exynos_abox_init();
++		hakios_shannon_init();
++		a21s_logdump_sync("IOKIT_POST_AUDIO");
+ 	}
+ 	{
+ 	/* Boot-arg sdprobe=1: read-only microSD probe (bsd/dev/starlte_sd.c):
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index 071fad1..57c1404 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -204,7 +204,7 @@ endif
+ # Shared C/C++ warning flags
+ # NOTE: order matters here.  -Wno-xxx goes before opt-in of ones we want
+ WARNFLAGS_STD := \
+-	-Weverything \
++	-w \
+ 	-Wundef-prefix=TARGET_OS_ \
+ 	-Wundef-prefix=LCK_GRP_USE_ARG \
+ 	-Wno-pedantic \
+@@ -1262,7 +1262,7 @@ INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_L
+ INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
+ # VMAPPLE's stand-ins for the TrustCache, CodeSignature and CoreEntitlements V2 types (the open source does not ship them);
+ # the generic ARMv8 boards take Apple's from the KDK, which these would shadow, so only the other boards see them
+-ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),)
++ifeq ($(filter SWEET A5XELTE HEROLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),)
+ INCFLAGS_EXTERN += -I$(SRCROOT)/EXTERNAL_HEADERS/scion-vmapple
+ endif
+ INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 64e9675..27165d5 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -183,37 +183,13 @@ TUNABLE(uint32_t, arm_diag, "diag", 0);
+  * Naming "sweetdef" on the loader's line (sweetdef=0) leaves the line exactly as the loader gave it.
+  */
+ static const char starlte_default_bootargs[] =
+-    "debug=0xc serial=3 cpus=8 rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1 "
+-    "cs_enforcement_disable=1 ignition_level=1 launchd_unsecure_cache=1 wdt=-1 "
+-    "a5fb_keep_on=1 sweetfb_scale=1 sweetfb_lw=828 sweetfb_lh=1792 a5fb_noconsole=1 a5fb_hz=60 sweetfb_gpu=1 "
+-    "vm_compression_limit=196608 cs_integrity_skip=1 sweetmemscale=4 sweetacl=1 sweetreboot=86400 usb_gadget=5 "
+-    "sweetinject=/usr/lib/s.dylib,backboardd,Preferences;/usr/lib/m.dylib,PosterBoard,SpringBoard;/usr/lib/b.dylib,backboardd "
+-    "sbprof=0 sbmtl=1 extra_ram=1 extra_ram_mask=127 cpufreq_gov=1 cpufreq_gov_big_min=1794000 "
+-    "sweetm3unpin=2 sweetspeed=100351 "
+-    /*
+-     * The S9's own hardware, on by default since 17 November 2026 so that one image has all of it to test together
+-     * (each was merged off; a run turns one off again by naming it on the loader's line: cp=0, abox=0, ...).
+-     * Appended last on purpose: when the loader's line leaves no room, these are the ones left out.
+-     * The temperatures read, the GPU's clock and the cores slowed by them, and a run ended at 110 C (tmu=3: until now
+-     * this tree read none by default and nothing stopped a hot run).
+-     * Sensors and rotation; restart and power off from iOS; the battery's gauge and the PMIC's clock, both read only;
+-     * Sileo's installs (persona_lax); Wi-Fi; the speakers, the codec, the microphone and Bluetooth; the modem, with its
+-     * NV data read from EFS READ ONLY into RAM (cp_nv=2: nothing is written to the phone) and its data context as
+-     * pdp_ip0 (cp_if=1: no data without cp_apn=, which only a run gives).
+-     */
+-    "tmu=3 shub=6 shub_hid=3 sweethalt=1 sweetfg=1 rtc_pmic=1 persona_lax=1 wifi_pcie=6 brcmfmac=8 "
+-    "abox=8 max98512=3 cs47l93=6 abox_mic=1 abox_rmem=1 bt=7 "
+-    "cp=7 cp_nv=2 cp_delay=40 cp_rfs=1 cp_if=1 "
+-    /*
+-     * On by default since 18 November 2026, at the owner's word ("enable all features"; faults are for follow-ups):
+-     * the cameras (cam_s9=7, front and rear in one boot with cam_switch=1; without the root's camera step nothing
+-     * opens the device), the GPU's job interrupt (sgu_irq=1: attached and measured on a phone, 17 November), files
+-     * compressed as decmpfs type 16 read (decmpfs_lz4=1: the app switcher's snapshots; not yet run on a phone), and
+-     * dyld's @rpath for the AMFI stand-in's processes (sweetatpath=1: Books' and Podcasts' widgets).
+-     * Not here on purpose: sweetfb_dpp (the display's scaler: after its probe boot), sweetc2 (a core powered down has
+-     * never come back on a phone), gov_policy=3 and ocp_guard=4 (above 1794 MHz), sgu_depth (measured harmful).
+-     */
+-    "cam_s9=7 cam_switch=1 sgu_irq=1 decmpfs_lz4=1 sweetatpath=1";
++    "rd=ufsroot0 ufsroot=system ufsrw=1 rootrw=1 a21s_idmac=1 sweetreboot=86400 herolog=0 decmpfs_lz4=1 cpus=7 a21s_input=1 startouch=92 "
++    "usb_gadget=5 usb_gadget_soc=exynos850 usb_gadget_clk=1 usb_muic=0 "
++    "cs_enforcement_disable=1 ignition_level=1 launchd_unsecure_cache=1 cs_integrity_skip=1 persona_lax=1 sweetatpath=1 sweetacl=1 wdt=-1 "
++    "debug=0xc serial=3 a5fb_keep_on=1 sweetfb_native=1 sweetfb_lw=720 sweetfb_lh=1600 sweetfb_noconsole=1 a5fb_noconsole=1 "
++    "a5fb_hz=60 sweetfb_hz=60 sweetfb_relbuf=1 sweetfb_nowait=0 sbgl=0 sbmtl=1 sbshot=0 sbprof=0 sweetepoch=1794988800 "
++    "sweetinject=/usr/lib/s.dylib,backboardd,Preferences;/usr/lib/m.dylib,SpringBoard,Preferences,InputUI,SBRendererService "
++    "sgu_irq=1 sgu_pri=92 sgu_spin_us=20 sgu_nap_us=25 sgu_depth=256 sgu_flushred=1 sgu_prof=0 sbm_prof=0 extra_ram=1 extra_ram_mask=255 sweetspeed=467406277 vm_compression_limit=196608 sweetmemscale=4 sweethalt=1";
+ 
+ static bool
+ starlte_bootarg_sep(char c)
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index a54e779..8a2c2c3 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1465,14 +1465,12 @@ ml_get_cpu_number(uint32_t phys_id)
+ {
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+ #if defined(STARLTE)
+-	/* Callers pass an ADT reg (bit 31 clear) or a raw MPIDR (bit 31 RES1).
+-	 * The Mongoose M3s' MPIDR has no MT bit and the same Aff1:Aff0 as A55
+-	 * core 1; their reg carries bit 16 instead, as start.s does. */
++	/* Exynos 850: raw MPIDR_EL1 (bit 31 set) has Aff2:Aff1 in bits [23:8];
++	 * ADT reg already stores normalized Aff2:Aff1 (0x000..0x003, 0x100..0x103). */
+ 	if (phys_id & (1U << 31)) {
+-		phys_id = (phys_id & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK)) |
+-		    ((phys_id & (1U << 24)) ? 0 : 0x10000);
++		phys_id = (phys_id >> 8) & 0xFFFFU;
+ 	} else {
+-		phys_id &= 0x10000 | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++		phys_id &= 0xFFFFU;
+ 	}
+ #else
+ 	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 67aeb6f..c86a1ab 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -145,14 +145,12 @@ LEXT(reset_vector)
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+ #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+ #if HAS_CLUSTER || defined(SWEET)
+-	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
+ #if defined(STARLTE)
+-	/* The Mongoose M3 cores have no MT bit: MPIDR 0x80000100..0x80000103,
+-	 * the same Aff1:Aff0 as A55 core 1 (0x81000100). Their ADT reg carries
+-	 * bit 16 (0x10100..0x10103, mkadt_starlte.py --big). */
+-	tbnz	x15, #24, 1f
+-	orr		x0, x0, #0x10000
+-1:
++	/* Exynos 850: both 4-core Cortex-A55 clusters are DynamIQ (MT=1):
++	 * Aff2 = cluster (0..1), Aff1 = core (0..3) -> 0x000..0x003, 0x100..0x103. */
++	ubfx	x0, x15, #8, #16
++#else
++	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
+ #endif
+ #else
+ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+diff --git a/osfmk/kern/host.c b/osfmk/kern/host.c
+index 891abed..2fd0522 100644
+--- a/osfmk/kern/host.c
++++ b/osfmk/kern/host.c
+@@ -829,16 +829,11 @@ vm_stats(void *info, unsigned int *count)
+ 	natural_t throttled_count = vm_page_throttled_count;
+ 
+ 	if (*count > HOST_VM_INFO64_COUNT) {
+-		vm_log_error("host_statistics64() count is larger than expected "
+-		    "(actual:%u > HOST_VM_INFO64_COUNT:%u). This is most likely a bug in "
+-		    "%s [%d] and is likely to result in memory corruption. The buffer count "
+-		    "must be passed in units of integer_t's. HOST_VM_INFO64_COUNT may be "
+-		    "used as shorthand.\n",
+-		    *count, HOST_VM_INFO64_COUNT,
+-		    task_best_name(current_task()), task_pid(current_task()));
+-		DTRACE_VM2(vm_stats_bad_count,
+-		    uint, *count,
+-		    uint, HOST_VM_INFO64_COUNT);
++		if (*count <= HOST_INFO_MAX) {
++			bzero((integer_t *)info + HOST_VM_INFO64_COUNT,
++			    (*count - HOST_VM_INFO64_COUNT) * sizeof(integer_t));
++		}
++		*count = HOST_VM_INFO64_COUNT;
+ 	}
+ 
+ 	if (*count < HOST_VM_INFO64_REV0_COUNT) {
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 3cdbe18..2015bc9 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -301,6 +301,8 @@ static struct {
+ } starlte_spi[STARLTE_SPI_MOST];
+ 
+ kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
++void starlte_gic_spi_mask(uint32_t intid);
++void starlte_gic_spi_unmask(uint32_t intid);
+ void starlte_gic_spi_detach(uint32_t intid);
+ uint64_t starlte_gic_spi_count(uint32_t intid);
+ bool starlte_gic_spi_handle(uint32_t intid);
+@@ -352,6 +354,24 @@ starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context,
+ 	return KERN_SUCCESS;
+ }
+ 
++void
++starlte_gic_spi_mask(uint32_t intid)
++{
++	if (a5_gicd_base && intid >= 32 && intid < 1020) {
++		a5_gic_write32(a5_gicd_base, 0x180 + 4 * (intid / 32), 1U << (intid % 32));
++		__builtin_arm_dsb(DSB_SY);
++	}
++}
++
++void
++starlte_gic_spi_unmask(uint32_t intid)
++{
++	if (a5_gicd_base && intid >= 32 && intid < 1020) {
++		a5_gic_write32(a5_gicd_base, 0x100 + 4 * (intid / 32), 1U << (intid % 32));
++		__builtin_arm_dsb(DSB_SY);
++	}
++}
++
+ /* Disabled, nothing pending, and no handler of it running when this returns. */
+ void
+ starlte_gic_spi_detach(uint32_t intid)
+diff --git a/pexpert/pexpert/arm64/A5XELTE.h b/pexpert/pexpert/arm64/A5XELTE.h
+index 8e2ccde..cded9b0 100644
+--- a/pexpert/pexpert/arm64/A5XELTE.h
++++ b/pexpert/pexpert/arm64/A5XELTE.h
+@@ -11,29 +11,22 @@
+ 
+ /* Firmware scanout buffer and the earliest XNU marker (physical). */
+ #if defined(ARM64_BOARD_CONFIG_STARLTE)
+-/* Galaxy S9 SM-G960F (Exynos 9810): reuses the HEROLTE port. S-Boot leaves
+- * DECON_F (0x16030000) scanning out this buffer (uniLoader board-starlte.c,
+- * s3cfb.bootloaderfb in the stock cmdline); the shim/starlte probe drew on it. */
++/* Galaxy A21s SM-A217F (Exynos 850 / S5E3830): 8x DynamIQ Cortex-A55, Mali-G52 MP1,
++ * DECON_F GOP scanout at 0xfa000000 (720x1600 XRGB8888, stride 2880). */
+ #define HEROLTE                       1
+ #define STARLTE                       1
+-/* Boot CPU: Cortex-A55 "ananke", MPIDR 0x81000000 (Aff1|Aff0 = 0). Only CPU0
+- * is described until the other cores' MPIDRs are measured. */
+ #define SWEET_SMP_MAX_CPUS            8
+-#define A5XELTE_FB_PA                 0xcc000000
+-#define A5XELTE_FB_WIDTH              1440
+-#define A5XELTE_FB_HEIGHT             2960
+-#define A5XELTE_FB_STRIDE             5760
+-#define A5XELTE_FB_BLOCKS             9     /* 2 MiB VA=PA bootstrap blocks (16.3 MiB) */
+-#define A5XELTE_FB_TEXT_SCALE         3
+-#define A5XELTE_FB_DOT_PITCH          458   /* iPhone X userland density */
+-/* The boot console runs between the Project Starbite header and the
+- * card slot the loader draws (tools/brand/overlay.mjs HEADER_H,
+- * BAND_TOP), so both stay on screen through the kernel boot. */
+-#define A5XELTE_CONSOLE_TOP           640
+-#define A5XELTE_CONSOLE_HEIGHT        1880
+-/* Log page below the XNU window 0x92000000; the vendor logs end at 0x9179c000. */
+-#define A5XELTE_MARKER_PA             0x91fff100
+-#define A5XELTE_BOOT_MPIDR            0x0
++#define A5XELTE_FB_PA                 0xfa000000
++#define A5XELTE_FB_WIDTH              720
++#define A5XELTE_FB_HEIGHT             1600
++#define A5XELTE_FB_STRIDE             2880
++#define A5XELTE_FB_BLOCKS             3     /* 3 x 2 MiB = 6 MiB >= 4.4 MiB */
++#define A5XELTE_FB_TEXT_SCALE         1
++#define A5XELTE_FB_DOT_PITCH          326   /* @2x iPhone 11 class density */
++#define A5XELTE_CONSOLE_TOP           0
++#define A5XELTE_CONSOLE_HEIGHT        1600
++#define A5XELTE_MARKER_PA             0x8ffff100
++#define A5XELTE_BOOT_MPIDR            0x001
+ #elif defined(ARM64_BOARD_CONFIG_HEROLTE)
+ /* Galaxy S7 SM-G930F: S-Boot leaves DECON_F scanning out this buffer. */
+ #define HEROLTE                       1

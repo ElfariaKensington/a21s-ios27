@@ -1,0 +1,747 @@
+{
+  "replayed_step_count": 113,
+  "replayed_steps": [
+    {
+      "index": 47,
+      "session": "T1",
+      "line": 393,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 49,
+      "session": "T1",
+      "line": 410,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 50,
+      "session": "T1",
+      "line": 415,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 53,
+      "session": "T1",
+      "line": 436,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 56,
+      "session": "T1",
+      "line": 461,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 57,
+      "session": "T1",
+      "line": 471,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 58,
+      "session": "T1",
+      "line": 476,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 59,
+      "session": "T1",
+      "line": 486,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 60,
+      "session": "T1",
+      "line": 490,
+      "action": "Bash (/Users/elfaria/a21s-ios/a21s/boot)"
+    },
+    {
+      "index": 61,
+      "session": "T1",
+      "line": 496,
+      "action": "Bash (/Users/elfaria/a21s-ios/a21s/boot)"
+    },
+    {
+      "index": 62,
+      "session": "T1",
+      "line": 506,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 65,
+      "session": "T1",
+      "line": 525,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 69,
+      "session": "T1",
+      "line": 551,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 75,
+      "session": "T1",
+      "line": 604,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 82,
+      "session": "T1",
+      "line": 655,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 94,
+      "session": "T1",
+      "line": 739,
+      "action": "Bash (/private/tmp/claude-501/f2fs-tools)"
+    },
+    {
+      "index": 110,
+      "session": "T1",
+      "line": 865,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 118,
+      "session": "T1",
+      "line": 922,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 119,
+      "session": "T1",
+      "line": 927,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 121,
+      "session": "T1",
+      "line": 942,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 124,
+      "session": "T1",
+      "line": 964,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 128,
+      "session": "T1",
+      "line": 993,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 131,
+      "session": "T1",
+      "line": 1018,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 135,
+      "session": "T1",
+      "line": 1044,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 140,
+      "session": "T1",
+      "line": 1081,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 142,
+      "session": "T1",
+      "line": 1096,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 143,
+      "session": "T1",
+      "line": 1101,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 157,
+      "session": "T1",
+      "line": 1200,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 158,
+      "session": "T1",
+      "line": 1205,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 160,
+      "session": "T1",
+      "line": 1220,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 161,
+      "session": "T1",
+      "line": 1225,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 164,
+      "session": "T1",
+      "line": 1248,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 174,
+      "session": "T1",
+      "line": 1319,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 177,
+      "session": "T1",
+      "line": 1383,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 184,
+      "session": "T1",
+      "line": 1431,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 198,
+      "session": "T1",
+      "line": 1532,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 199,
+      "session": "T1",
+      "line": 1537,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 217,
+      "session": "T1",
+      "line": 1669,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 249,
+      "session": "T1",
+      "line": 1920,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 258,
+      "session": "T1",
+      "line": 1990,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 268,
+      "session": "T1",
+      "line": 2069,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 277,
+      "session": "T1",
+      "line": 2138,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 288,
+      "session": "T1",
+      "line": 2238,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 289,
+      "session": "T1",
+      "line": 2248,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 308,
+      "session": "T1",
+      "line": 2386,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 313,
+      "session": "T1",
+      "line": 2429,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 318,
+      "session": "T1",
+      "line": 2465,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 322,
+      "session": "T1",
+      "line": 2505,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 327,
+      "session": "T1",
+      "line": 2549,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 332,
+      "session": "T1",
+      "line": 2593,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 336,
+      "session": "T1",
+      "line": 2626,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 341,
+      "session": "T1",
+      "line": 2668,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 349,
+      "session": "T1",
+      "line": 2736,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 353,
+      "session": "T1",
+      "line": 2777,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 357,
+      "session": "T1",
+      "line": 2813,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 374,
+      "session": "T1",
+      "line": 2989,
+      "action": "Write core/drivers/input/hakios.a21s_input.c"
+    },
+    {
+      "index": 375,
+      "session": "T1",
+      "line": 3000,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 376,
+      "session": "T1",
+      "line": 3007,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 393,
+      "session": "T1",
+      "line": 3151,
+      "action": "Edit core/drivers/input/hakios.a21s_input.c"
+    },
+    {
+      "index": 401,
+      "session": "T1",
+      "line": 3237,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 416,
+      "session": "T1",
+      "line": 3354,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 417,
+      "session": "T1",
+      "line": 3365,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 428,
+      "session": "T1",
+      "line": 3465,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 433,
+      "session": "T1",
+      "line": 3509,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 440,
+      "session": "T1",
+      "line": 3575,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 451,
+      "session": "T1",
+      "line": 3675,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 453,
+      "session": "T1",
+      "line": 3692,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 456,
+      "session": "T1",
+      "line": 3711,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 459,
+      "session": "T1",
+      "line": 3739,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 485,
+      "session": "T1",
+      "line": 3927,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 492,
+      "session": "T1",
+      "line": 3987,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 493,
+      "session": "T1",
+      "line": 3993,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 494,
+      "session": "T1",
+      "line": 4006,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 508,
+      "session": "T1",
+      "line": 4129,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 523,
+      "session": "T1",
+      "line": 4263,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 528,
+      "session": "T1",
+      "line": 4292,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 541,
+      "session": "T1",
+      "line": 4402,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 554,
+      "session": "T1",
+      "line": 4491,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 555,
+      "session": "T1",
+      "line": 4495,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 556,
+      "session": "T1",
+      "line": 4505,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 563,
+      "session": "T1",
+      "line": 4568,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 564,
+      "session": "T1",
+      "line": 4574,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 598,
+      "session": "T1",
+      "line": 4858,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 599,
+      "session": "T1",
+      "line": 4868,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 603,
+      "session": "T1",
+      "line": 4893,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 604,
+      "session": "T1",
+      "line": 4898,
+      "action": "Bash (/Users/elfaria/Library/Application)"
+    },
+    {
+      "index": 663,
+      "session": "T2",
+      "line": 485,
+      "action": "Edit core/drivers/gpu/hakios.mali.c"
+    },
+    {
+      "index": 664,
+      "session": "T2",
+      "line": 487,
+      "action": "Edit core/drivers/gpu/hakios.mali.c"
+    },
+    {
+      "index": 665,
+      "session": "T2",
+      "line": 496,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 666,
+      "session": "T2",
+      "line": 509,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/drivers/input)"
+    },
+    {
+      "index": 688,
+      "session": "T2",
+      "line": 701,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnuloader)"
+    },
+    {
+      "index": 712,
+      "session": "T2",
+      "line": 905,
+      "action": "Bash (/private/tmp/claude-501)"
+    },
+    {
+      "index": 715,
+      "session": "T2",
+      "line": 930,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/userland)"
+    },
+    {
+      "index": 724,
+      "session": "T2",
+      "line": 1015,
+      "action": "Bash (/Users/elfaria/a21s-ios)"
+    },
+    {
+      "index": 745,
+      "session": "T2",
+      "line": 1208,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnu-src/xnu-8796.121.2/osfmk/arm64)"
+    },
+    {
+      "index": 747,
+      "session": "T2",
+      "line": 1228,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnu-src/xnu-8796.121.2/osfmk/arm64)"
+    },
+    {
+      "index": 749,
+      "session": "T2",
+      "line": 1247,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnu-src/xnu-8796.121.2/osfmk/arm64)"
+    },
+    {
+      "index": 750,
+      "session": "T2",
+      "line": 1255,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnu-src/xnu-8796.121.2/osfmk/arm)"
+    },
+    {
+      "index": 756,
+      "session": "T2",
+      "line": 1323,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnu-src/xnu-8796.121.2/osfmk/arm64)"
+    },
+    {
+      "index": 758,
+      "session": "T2",
+      "line": 1343,
+      "action": "Bash (/Users/elfaria/a21s-ios)"
+    },
+    {
+      "index": 759,
+      "session": "T2",
+      "line": 1349,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 815,
+      "session": "T2",
+      "line": 1846,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 816,
+      "session": "T2",
+      "line": 1851,
+      "action": "Bash (/Users/elfaria/a21s-ios)"
+    },
+    {
+      "index": 817,
+      "session": "T2",
+      "line": 1862,
+      "action": "Bash (/Users/elfaria/a21s-ios)"
+    },
+    {
+      "index": 821,
+      "session": "T2",
+      "line": 1900,
+      "action": "Bash (/Users/elfaria/a21s-ios/a21s/hw)"
+    },
+    {
+      "index": 853,
+      "session": "T2",
+      "line": 2193,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/drivers/gpu)"
+    },
+    {
+      "index": 857,
+      "session": "T2",
+      "line": 2233,
+      "action": "Bash (/Users/elfaria/a21s-ios/a21s/hw)"
+    },
+    {
+      "index": 865,
+      "session": "T2",
+      "line": 2309,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 866,
+      "session": "T2",
+      "line": 2322,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 868,
+      "session": "T2",
+      "line": 2335,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 869,
+      "session": "T2",
+      "line": 2342,
+      "action": "Bash (/Users/elfaria/a21s-ios/core)"
+    },
+    {
+      "index": 885,
+      "session": "T2",
+      "line": 2501,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/userland)"
+    },
+    {
+      "index": 911,
+      "session": "T2",
+      "line": 2755,
+      "action": "Bash (/Users/elfaria/a21s-ios/core/xnuloader)"
+    }
+  ],
+  "created_files": [
+    "a21s/README.md",
+    "a21s/STATUS.md",
+    "a21s/boot/Makefile",
+    "a21s/boot/a21s.h",
+    "a21s/boot/bootimg.c",
+    "a21s/boot/console.c",
+    "a21s/boot/efi_shim.c",
+    "a21s/boot/font.h",
+    "a21s/boot/font_gen.py",
+    "a21s/boot/ios.c",
+    "a21s/boot/libfdt/fdt.c",
+    "a21s/boot/libfdt/fdt.h",
+    "a21s/boot/libfdt/fdt_addresses.c",
+    "a21s/boot/libfdt/fdt_ro.c",
+    "a21s/boot/libfdt/fdt_rw.c",
+    "a21s/boot/libfdt/fdt_strerror.c",
+    "a21s/boot/libfdt/fdt_wip.c",
+    "a21s/boot/libfdt/libfdt.h",
+    "a21s/boot/libfdt/libfdt_env.h",
+    "a21s/boot/libfdt/libfdt_internal.h",
+    "a21s/boot/link.ld",
+    "a21s/boot/main.c",
+    "a21s/boot/mmc.c",
+    "a21s/boot/start.S",
+    "a21s/boot/touch.c",
+    "a21s/boot/util.c",
+    "a21s/boot/vectors.S",
+    "a21s/tools/a21s-install.py",
+    "a21s/tools/boot-once.sh",
+    "a21s/tools/build-ondevice.sh",
+    "a21s/tools/mkboot.py",
+    "a21s/tools/ondevice/iosfile.c",
+    "core/configs/a21s_defconfig",
+    "core/drivers/input/hakios.a21s_input.c",
+    "core/tools/mesa/zz-panfrost-bo-keep-map.patch",
+    "core/tools/mk-mesa-local.sh",
+    "core/userland/rc.jobs.a21s",
+    "core/userland/var/mobile/Library/Preferences/com.apple.Accessibility.plist",
+    "core/xnu/patches/1513-psci-low-trampoline.patch",
+    "devices/a21s/device.conf"
+  ],
+  "modified_files": [
+    "core/configs/boot-args.lst",
+    "core/configs/common_defconfig",
+    "core/configs/symbols.tsv",
+    "core/drivers/core/hakios.exynos_acpm.c",
+    "core/drivers/core/hakios.stubs.c",
+    "core/drivers/gpu/hakios.mali.c",
+    "core/drivers/input/conf",
+    "core/drivers/input/hakios.input.c",
+    "core/drivers/map",
+    "core/userland/mkjobs.py",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm/arm_init.c",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm64/loader_return.c",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm64/machine_routines.c",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm64/psci_smp.c",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm64/psci_smp.h",
+    "core/xnu-src/xnu-8796.121.2/osfmk/arm64/start.s",
+    "core/xnu/apply.sh",
+    "core/xnu/files/bsd/sys/hakios.input.h",
+    "core/xnu/files/osfmk/arm64/loader_return.c",
+    "core/xnuloader/loader.c"
+  ]
+}

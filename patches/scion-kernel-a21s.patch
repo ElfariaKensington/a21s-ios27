@@ -1,0 +1,3164 @@
+diff --git a/drivers/audio/abox/hakios.exynos_abox.c b/drivers/audio/abox/hakios.exynos_abox.c
+index e75157b..821419e 100644
+--- a/drivers/audio/abox/hakios.exynos_abox.c
++++ b/drivers/audio/abox/hakios.exynos_abox.c
+@@ -201,7 +201,7 @@ static const char *const step_names[STEPS + 1] = {
+ };
+ 
+ static uint32_t steps, secs = 3, route_sifs1 = 1, bclk_on, gain, dvfs_khz;
+-static uint32_t sbank_bytes = 512, burst = 8;   /* Samsung's S10 values (see the header); set when the field reads 0 */
++static uint32_t sbank_bytes = 512, burst = 4;   /* ABOX v2.3 defaults; set when the field reads 0 */
+ static bool sbank_given, burst_given;           /* given on the command line: set whatever the field reads */
+ static uint32_t rdma_ctrl0 = UINT32_MAX, rdma_ctrl1 = UINT32_MAX, vol = UINT32_MAX;
+ /* seen on the S9: the boot leaves ABOX's SysMMU translating (CTRL 0x4), and sys/hakios.exynos_abox.h names what
+@@ -209,7 +209,7 @@ static uint32_t rdma_ctrl0 = UINT32_MAX, rdma_ctrl1 = UINT32_MAX, vol = UINT32_M
+ static uint32_t mmu_off = 1;            /* abox_mmu_off: a translating SysMMU switched off (CTRL 0), not refused */
+ static uint32_t syspower = 1;           /* abox_syspower: SYSPOWER_CTRL 1 (DRAM on) and the ACLK/BCLK Q-channels kept on */
+ static uint32_t rdma_fmt = 1;           /* abox_rdma_fmt: RDMA0 CTRL0's FORMAT, FUNC 0, BUF_UPDATE, SBANK_LIMIT, as calliope */
+-static uint32_t ring_pa;                /* abox_ring_pa: the ring at this physical address (below 4 GB, in abox_rmem) */
++static uint32_t ring_pa = ABOX_RMEM_PA; /* abox_ring_pa: dedicated abox_rmem at 0xE6C00000 by default */
+ static volatile uint32_t busy;          /* a run (boot's or the console's) is going on */
+ static uint32_t step;                   /* the step being made, for what is said */
+ 
+@@ -224,7 +224,7 @@ struct block {
+ static struct block pmu = { "PMU", ABOX_PMU_PA, 0x5000, 0 };
+ static struct block cmu = { "CMU_AUD", ABOX_CMU_PA, 0x8000, 0 };
+ static struct block sysreg = { "SYSREG_AUD", ABOX_SYSREG_PA, 0x1000, 0 };
+-static struct block abox = { "ABOX", ABOX_SFR_PA, 0x3000, 0 };   /* through the WDMAs (0x2000) */
++static struct block abox = { "ABOX", ABOX_SFR_PA, 0x4000, 0 };   /* through the WDMAs (0x3000 on ABOX v2.3) */
+ static struct block gpio = { "GPIO_AUD", ABOX_GPIO_PA, 0x1000, 0 };
+ static struct block mmu = { "SYSMMU_ABOX", ABOX_SYSMMU_PA, 0x1000, 0 };
+ 
+@@ -438,14 +438,13 @@ step_look(void)
+ 	say("abox: 1: reading the PMU's AUD domain, its pads, ABOX's CPU (nothing of the AUD block itself)\n");
+ 	(void)peek(&pmu, "AUD_CONFIGURATION", PMU_AUD_CONFIGURATION);
+ 	status = peek(&pmu, "AUD_STATUS", PMU_AUD_STATUS);
+-	(void)peek(&pmu, "GPIO_MODE_ABOX_SYS_PWR_REG", PMU_GPIO_MODE_ABOX);
+-	(void)peek(&pmu, "PAD_RETENTION_ABOX_OPTION", PMU_PAD_RETENTION_ABOX);
++	(void)peek(&pmu, "PAD_RETENTION_AUD_OPTION", PMU_PAD_RETENTION_ABOX);
+ 	(void)peek(&pmu, "ABOX_CPU_CONFIGURATION", PMU_ABOX_CPU_CONFIG);
+ 	(void)peek(&pmu, "ABOX_CPU_STATUS", PMU_ABOX_CPU_STATUS);
+ 	(void)peek(&pmu, "ABOX_CPU_OPTION", PMU_ABOX_CPU_OPTION);
+ 	(void)peek(&pmu, "ABOX_CPU_STANDBY", PMU_ABOX_CPU_STANDBY);
+-	on_at_boot = (status & 0xF) == 0xF;
+-	say("abox: 1: the AUD domain is %s\n", on_at_boot ? "ON already (the boot left it so)" : (status & 0xF) == 0 ? "off" :
++	on_at_boot = (status & PMU_AUD_MASK) == PMU_AUD_MASK;
++	say("abox: 1: the AUD domain is %s\n", on_at_boot ? "ON already (the boot left it so)" : (status & PMU_AUD_MASK) == 0 ? "off" :
+ 	    "neither on nor off");
+ #if __has_include(<vm/vm_kern_xnu.h>)   /* xnu-12377: hakios_acpm_init() is a stub returning false */
+ 	error = hakios_acpm_dvfs_get(ACPM_DVFS_AUD, &khz);
+@@ -472,27 +471,21 @@ step_power(void)
+ 	uint32_t id;
+ 
+ 	if (!on_at_boot) {
+-		say("abox: 2: about to switch the AUD domain on (PMU AUD_CONFIGURATION [3:0] = 0xF)\n");
+-		(void)poke_bits(&pmu, "AUD_CONFIGURATION", PMU_AUD_CONFIGURATION, 0xF, 0xF);
++		say("abox: 2: about to switch the AUD domain on (PMU AUD_CONFIGURATION [0] = 0x1)\n");
++		(void)poke_bits(&pmu, "AUD_CONFIGURATION", PMU_AUD_CONFIGURATION, PMU_AUD_MASK, PMU_AUD_MASK);
+ 		powered_here = true;
+-		if (!wait_bits(&pmu, PMU_AUD_STATUS, 0xF, 0xF, 10000, &took)) {
++		if (!wait_bits(&pmu, PMU_AUD_STATUS, PMU_AUD_MASK, PMU_AUD_MASK, 10000, &took)) {
+ 			say("abox: 2: AUD_STATUS reads %#x after %llu us: the domain did not come up\n", rd(&pmu, PMU_AUD_STATUS), took);
+ 			return false;
+ 		}
+ 		say("abox: 2: the AUD domain is on after %llu us\n", took);
+ 	}
+-	say("abox: 2: about to make SMC %#x (1, %#x): the DTZPC restore Samsung's CAL makes once the AUD domain has power; "
++	say("abox: 2: about to make SMC %#x (1, %#x, 2): the DTZPC restore Samsung's CAL makes once the AUD domain has power; "
+ 	    "Carbon, at EL2, passes it on to EL3\n", ABOX_SMC_PD_ONOFF, ABOX_DTZPC_ARG);
+-	answer = smc(ABOX_SMC_PD_ONOFF, 1, ABOX_DTZPC_ARG, 0);
++	answer = smc(ABOX_SMC_PD_ONOFF, 1, ABOX_DTZPC_ARG, 2);
+ 	say("abox: 2: SMC %#x returned %#llx\n", ABOX_SMC_PD_ONOFF, answer);
+ 	if ((uint32_t)answer != 0) {
+-		if (!powered_here) {
+-			say("abox: 2: not 0, but the domain was on before us: what the boot set up is taken to stand\n");
+-		} else {
+-			say("abox: 2: not 0 (%s): the block's registers may not answer the AP; stopping here\n",
+-			    (uint32_t)answer == 0xffffffffu ? "SMCCC's NOT_SUPPORTED" : "taken as a refusal");
+-			return false;
+-		}
++		say("abox: 2: SMC returned %#llx: continuing to check IP_INDEX directly\n", answer);
+ 	}
+ 	say("abox: 2: reading ABOX's IP_INDEX at %#x: should the run end here, the block does not answer the AP\n",
+ 	    ABOX_SFR_PA + ABOX_IP_INDEX);
+@@ -508,11 +501,14 @@ step_power(void)
+ 	(void)peek(&abox, "REMAP_ADDR", ABOX_REMAP_ADDR);
+ 	(void)peek(&abox, "DYN_CLOCK_OFF", ABOX_DYN_CLOCK_OFF);
+ 	(void)peek(&abox, "QCHANNEL_DISABLE", ABOX_QCHANNEL_DISABLE);
+-	/* bypass: ABOX's CPU stays off, released last of all in abox_enable() and never here */
+-	if ((rd(&pmu, PMU_ABOX_CPU_OPTION) & PMU_ABOX_CPU_ENABLE) || (rd(&pmu, PMU_ABOX_CPU_CONFIG) & 1)) {
++	/* bypass: ABOX's CPU cores stay off, released last of all in abox_enable() and never here */
++	if ((rd(&pmu, PMU_ABOX_CPU_OPTION) & PMU_ABOX_CPU_ENABLE) || (rd(&pmu, PMU_ABOX_CPU_CONFIG) & 1) ||
++	    (rd(&pmu, PMU_ABOX_CPU1_OPTION) & PMU_ABOX_CPU_ENABLE) || (rd(&pmu, PMU_ABOX_CPU1_CONFIG) & 1)) {
+ 		say("abox: 2: ABOX's CPU is on: off again (abox.c's order: released first, then its power)\n");
+ 		(void)poke_bits(&pmu, "ABOX_CPU_OPTION", PMU_ABOX_CPU_OPTION, PMU_ABOX_CPU_ENABLE, 0);
+ 		(void)poke_bits(&pmu, "ABOX_CPU_CONFIGURATION", PMU_ABOX_CPU_CONFIG, 1, 0);
++		(void)poke_bits(&pmu, "ABOX_CPU1_OPTION", PMU_ABOX_CPU1_OPTION, PMU_ABOX_CPU_ENABLE, 0);
++		(void)poke_bits(&pmu, "ABOX_CPU1_CONFIGURATION", PMU_ABOX_CPU1_CONFIG, 1, 0);
+ 	} else {
+ 		say("abox: 2: ABOX's CPU is off and stays so (bypass)\n");
+ 	}
+@@ -543,7 +539,7 @@ pll_hz(void)
+ 	uint32_t con0 = rd(&cmu, CMU_PLL_CON0), m = (con0 >> 16) & 0x3FF, p = (con0 >> 8) & 0x3F, s = con0 & 7;
+ 	int64_t k = (int16_t)(rd(&cmu, CMU_PLL_CON3) & 0xFFFF);
+ 
+-	if (!(con0 & PLL_MUX_SEL)) {
++	if (PLL_MUX_SEL != 0 && !(con0 & PLL_MUX_SEL)) {
+ 		return 26000000;
+ 	}
+ 	if (!(con0 & PLL_ENABLE) || p == 0) {
+@@ -579,27 +575,25 @@ step_clocks(void)
+ 		error = hakios_acpm_dvfs_set(ACPM_DVFS_AUD, dvfs_khz);
+ 		say("abox: 3: ACPM answered %d\n", error);
+ 	}
+-	say("abox: 3: about to write SYSREG_AUD MISC_CON and CMU_AUD (dividers, UAIF1's mux, PLL_AUD, two Q-channels)\n");
++	say("abox: 3: about to configure CMU_AUD (dividers, UAIF1's mux, PLL_AUD, Q-channels)\n");
++	(void)peek(&cmu, "PLL_CON0_AUD", 0x0100);
+ 	(void)peek(&cmu, "PLL_CON0", CMU_PLL_CON0);
+ 	(void)peek(&cmu, "PLL_CON3", CMU_PLL_CON3);
+ 	(void)peek(&cmu, "MUX_CLK_AUD_CPU", CMU_MUX_CPU);
+ 	(void)peek(&cmu, "DIV_CLK_AUD_PLL", CMU_DIV_PLL);
++	(void)peek(&cmu, "DIV_CLK_AUD_CNT", 0x1810);
+ 	(void)peek(&cmu, "CONTROLLER_OPTION", CMU_CONTROLLER_OPTION);
+ 	(void)peek(&cmu, "HCHGEN_CLKMUX", CMU_HCHGEN_CLKMUX);
+-	(void)peek(&cmu, "QCH ABOX_DUMMY (cpu)", CMU_QCH_DUMMY);
++	(void)peek(&cmu, "QCH ABOX_CPU", CMU_QCH_DUMMY);
+ 	(void)peek(&cmu, "QCH ABOX_ACLK", CMU_QCH_ACLK);
+ 	(void)peek(&cmu, "QCH GPIO_AUD", CMU_QCH_GPIO);
+-	(void)peek(&cmu, "GATE BCLK_UAIF1", CMU_GATE_BCLK_UAIF1);
+-	(void)peek(&cmu, "GATE RSTNSYNC_UAIF1", CMU_GATE_RSTN_UAIF1);
+ 	(void)peek(&sysreg, "BUS_COMPONENT_DRCG_EN", SYSREG_DRCG_EN);
+-	(void)peek(&sysreg, "SNPS_EMA", SYSREG_SNPS_EMA);
+-	(void)poke(&sysreg, "MISC_CON", SYSREG_MISC_CON, 1);
+ 
+ 	/* the dividers first, while PLL_AUD may still be off: when it comes up, nothing downstream runs faster than meant */
+-	if (!cmu_ratio("DIV_CLK_AUD_BUS", CMU_DIV_BUS, 0x7, AUD_DIV_BUS) ||
+-	    !cmu_ratio("DIV_CLK_AUD_BUSP", CMU_DIV_BUSP, 0x3, AUD_DIV_BUSP) ||
++	if (!cmu_ratio("DIV_CLK_AUD_BUS", CMU_DIV_BUS, 0xF, AUD_DIV_BUS) ||
++	    !cmu_ratio("DIV_CLK_AUD_BUSP", CMU_DIV_BUSP, 0xF, AUD_DIV_BUSP) ||
+ 	    !cmu_ratio("DIV_CLK_AUD_AUDIF", CMU_DIV_AUDIF, 0x1FF, AUD_DIV_AUDIF) ||
+-	    !cmu_ratio("DIV_CLK_AUD_UAIF1", CMU_DIV_UAIF1, 0x1FF, AUD_DIV_UAIF1) ||
++	    !cmu_ratio("DIV_CLK_AUD_UAIF1", CMU_DIV_UAIF1, 0x3FF, AUD_DIV_UAIF1) ||
+ 	    !cmu_ratio("MUX_CLK_AUD_UAIF1", CMU_MUX_UAIF1, 0x1, 0)) {
+ 		say("abox: 3: a divider or the mux did not take its value\n");
+ 		return false;
+@@ -612,7 +606,7 @@ step_clocks(void)
+ 		say("abox: 3: PLL_AUD already runs at M %u P %u S %u K %u: left so\n", PLL_AUD_M, PLL_AUD_P, PLL_AUD_S, PLL_AUD_K);
+ 	} else {
+ 		/* ra_set_pll(): off (the mux to OSCCLK first), lock time, K, then M/P/S with ENABLE and the mux, until STABLE */
+-		if (con0 & PLL_MUX_SEL) {
++		if (PLL_MUX_SEL != 0 && (con0 & PLL_MUX_SEL)) {
+ 			(void)poke_bits(&cmu, "PLL_CON0 (mux to OSCCLK)", CMU_PLL_CON0, PLL_MUX_SEL, 0);
+ 			if (!wait_bits(&cmu, CMU_PLL_CON0, PLL_MUX_BUSY, 0, 1000, &took)) {
+ 				say("abox: 3: PLL_AUD's mux still busy after %llu us\n", took);
+@@ -630,16 +624,22 @@ step_clocks(void)
+ 		}
+ 		say("abox: 3: PLL_AUD stable after %llu us\n", took);
+ 	}
+-	qch_on("QCH ABOX_DUMMY (abox's cpu clock, which abox_enable() turns on with no firmware yet)", CMU_QCH_DUMMY);
++	qch_on("QCH ABOX_CPU", CMU_QCH_DUMMY);
++	qch_on("QCH ABOX_ACLK", CMU_QCH_ACLK);
++	qch_on("QCH ABOX_CCLK_ASB", CMU_QCH_CCLK_ASB);
+ 	qch_on("QCH ABOX_BCLK1 (UAIF1's bclk_gate)", CMU_QCH_BCLK1);
++	qch_on("QCH ABOX_BCLK_CNT", 0x3030);
++	qch_on("QCH D_TZPC_AUD", 0x303C);
++	qch_on("QCH LHS_AXI_D_AUD", 0x3048);
++	qch_on("QCH GPIO_AUD", CMU_QCH_GPIO);
+ 	qch_on("QCH SYSMMU_AUD (the SysMMU's aclk)", CMU_QCH_SYSMMU);
+ 
+ 	hz = pll_hz();
+-	say("abox: 3: PLL_AUD %llu Hz; so ACLK %llu, its APB %llu, AUDIF %llu, UAIF1's BCLK %llu (want 1179648040, 589824020, "
+-	    "196608006, 73728002, 1536000)\n", hz, hz / ((rd(&cmu, CMU_DIV_BUS) & 7) + 1),
+-	    hz / ((rd(&cmu, CMU_DIV_BUS) & 7) + 1) / ((rd(&cmu, CMU_DIV_BUSP) & 3) + 1), hz / ((rd(&cmu, CMU_DIV_AUDIF) & 0x1FF) + 1),
+-	    hz / ((rd(&cmu, CMU_DIV_AUDIF) & 0x1FF) + 1) / ((rd(&cmu, CMU_DIV_UAIF1) & 0x1FF) + 1));
+-	if (hz < 1179000000 || hz > 1180300000) {
++	say("abox: 3: PLL_AUD %llu Hz; so ACLK %llu, its APB %llu, AUDIF %llu, UAIF1's BCLK %llu (want 1032192118, 516096059, "
++	    "172032019, 73728008, 1536000)\n", hz, hz / ((rd(&cmu, CMU_DIV_BUS) & 0xF) + 1),
++	    hz / ((rd(&cmu, CMU_DIV_BUSP) & 0xF) + 1), hz / ((rd(&cmu, CMU_DIV_AUDIF) & 0x1FF) + 1),
++	    hz / ((rd(&cmu, CMU_DIV_AUDIF) & 0x1FF) + 1) / ((rd(&cmu, CMU_DIV_UAIF1) & 0x3FF) + 1));
++	if (hz < 1031500000 || hz > 1033500000) {
+ 		say("abox: 3: PLL_AUD is not at the 48 kHz family's rate: stopping here\n");
+ 		return false;
+ 	}
+@@ -663,9 +663,8 @@ step_pins(void)
+ 		say("abox: 4: the pins did not take function 2\n");
+ 		return false;
+ 	}
+-	/* abox_pad_retention(false): OPTION's bit 28, then GPIO_MODE's bit 0 */
+-	(void)poke_bits(&pmu, "PAD_RETENTION_ABOX_OPTION", PMU_PAD_RETENTION_ABOX, PMU_PAD_RELEASE, PMU_PAD_RELEASE);
+-	(void)poke_bits(&pmu, "GPIO_MODE_ABOX_SYS_PWR_REG", PMU_GPIO_MODE_ABOX, 1, 1);
++	/* Exynos 850 abox_runtime_resume(): exynos_pmu_update(0x20A0, 0x800, 0x800) releases pad retention */
++	(void)poke_bits(&pmu, "PAD_RETENTION_AUD_OPTION", PMU_PAD_RETENTION_ABOX, PMU_PAD_RELEASE, PMU_PAD_RELEASE);
+ 	(void)peek(&gpio, "gpb1 DAT", GPIO_GPB1 + GPIO_DAT);
+ 	return true;
+ }
+@@ -791,6 +790,18 @@ step_route(void)
+ 		(void)poke_bits(&abox, "SPUS_CTRL2 (MIXP_FLUSH)", ABOX_SPUS_CTRL2, 1, 1);
+ 	}
+ 	sample_banks();
++	/* ABOX v2.3.0 SPUS_CTRL_SIFS_CNT1 (0x0294): set_cnt_val() programs (cnt_rate * 4 + ch*rate/2) / (ch*rate) - 1 */
++	{
++		uint64_t cnt_hz = pll_hz() / ((rd(&cmu, 0x1810) & 0xFu) + 1);
++		uint32_t denom = HAKIOS_ABOX_CHANNELS * HAKIOS_ABOX_RATE;
++		uint32_t cnt_val = (uint32_t)((cnt_hz * 4ull + denom / 2) / denom - 1ull);
++
++		(void)peek(&abox, "SPUS_CTRL_SIFS_CNT0", 0x0290);
++		(void)peek(&abox, "SPUS_CTRL_SIFS_CNT1", 0x0294);
++		if (rd(&abox, 0x0294) == 0) {
++			(void)poke_bits(&abox, "SPUS_CTRL_SIFS_CNT1", 0x0294, 0xFFFFFFu, cnt_val);
++		}
++	}
+ 	return (rd(&abox, ABOX_SPUS_CTRL0) & SPUS_CHAIN_MASK) == (route_sifs1 ? SPUS_OUT_SIFS1 : SPUS_OUT_SIFS0) &&
+ 	       ((rd(&abox, ABOX_ROUTE_CTRL0) >> ROUTE_UAIF1_SHIFT) & 0xF) == (route_sifs1 ? ROUTE_SIFS1 : ROUTE_SIFS0);
+ }
+@@ -912,7 +923,7 @@ sysmmu_passes(void)
+ 	(void)peek(&mmu, "MMU_CFG", MMU_CFG);
+ 	(void)peek(&mmu, "MMU_STATUS", MMU_STATUS);
+ 	(void)peek(&mmu, "MMU_VERSION", MMU_VERSION);
+-	(void)peek(&mmu, "MMU_PT_BASE", MMU_PT_BASE);
++	/* SysMMU v7 (0x70800000 on Exynos 850) has no v5 PT_BASE at +0x00C (reading it triggers an SError). */
+ 	if ((ctrl & MMU_CTRL_TRANSLATE) && mmu_off) {
+ 		/* seen on the S9: the boot leaves it at 0x4 with ABOX's CPU on. Linux's CTRL_DISABLE (0) is what a master
+ 		 * without its SysMMU runs with; nothing but ABOX goes through this one (abox_mmu_off=0: refuse instead) */
+@@ -941,7 +952,7 @@ sysmmu_passes(void)
+ #if __has_include(<vm/vm_kern_xnu.h>)   /* xnu-12377 */
+ /* a contiguous buffer below 4 GB from IOKit, kept for good: iokit/bsddev/IOKitBSDInit.cpp */
+ extern vm_offset_t hakios_dma32_alloc(vm_size_t size, uint64_t *pa);
+-static uint32_t use_rmem;               /* abox_rmem=1: abox_rmem when IOKit has nothing below 4 GB (Scion's choice) */
++static uint32_t use_rmem = 1;           /* abox_rmem=1: abox_rmem at 0xE6C00000 by default on Exynos 850 */
+ static bool area_failed_said;
+ 
+ /* the ring and its zeroes, had once (at the driver's start, or at the first stream) and never given back */
+@@ -1197,8 +1208,17 @@ fill_period(uint32_t p, enum source source)
+ 	if (source == SINK && n != 0 && hakios_audio_recording_fed()) {
+ 		hakios_audio_record_fed(period_buf, n);
+ 	}
+-	memcpy((void *)(area + p * PERIOD_BYTES), period_buf, PERIOD_BYTES);
+-	FlushPoC_DcacheRegion(area + p * PERIOD_BYTES, PERIOD_BYTES);
++	if (area_rmem) {
++		volatile uint32_t *dst = (volatile uint32_t *)(area + p * PERIOD_BYTES);
++		const uint32_t *src = (const uint32_t *)period_buf;
++		for (uint32_t i = 0; i < PERIOD_BYTES / 4; i++) {
++			dst[i] = src[i];
++		}
++		__builtin_arm_dsb(0xf);
++	} else {
++		memcpy((void *)(area + p * PERIOD_BYTES), period_buf, PERIOD_BYTES);
++		FlushPoC_DcacheRegion(area + p * PERIOD_BYTES, PERIOD_BYTES);
++	}
+ }
+ 
+ /* tenths of a dB as text */
+@@ -1511,7 +1531,7 @@ step_sink(void)
+ #define ABOX_SPUM_CTRL3         0x030C
+ #define ABOX_SPUM_SBANK_NSRC0   0x0328          /* the S10's abox_soc.h: SPUM_SBANK_NSRCn at 0x328 + 4n (ABOX before 2.0) */
+ #define ROUTE_NSRC_UAIF0        8u
+-#define ABOX_WDMA(n)            (0x2000 + 0x100 * (n))
++#define ABOX_WDMA(n)            (0x3000 + 0x100 * (n))
+ #define W1(reg)                 (ABOX_WDMA(1) + (reg))
+ #define REC_RING_PA             (ABOX_RMEM_PA + 0x100000u)
+ #define REC_RING_BYTES          0x10000u
+@@ -1605,7 +1625,7 @@ rec_levels(uint32_t frames)
+ static bool
+ uaif0_prepare(void)
+ {
+-	if (!cmu_ratio("DIV_CLK_AUD_UAIF0", CMU_DIV_UAIF0, 0x1FF, AUD_DIV_UAIF1) ||
++	if (!cmu_ratio("DIV_CLK_AUD_UAIF0", CMU_DIV_UAIF0, 0x3FF, AUD_DIV_UAIF1) ||
+ 	    !cmu_ratio("MUX_CLK_AUD_UAIF0", CMU_MUX_UAIF0, 0x1, 0)) {
+ 		return false;
+ 	}
+@@ -1613,8 +1633,7 @@ uaif0_prepare(void)
+ 	(void)poke_bits(&gpio, "gpb0 CON (UAIF0)", GPIO_GPB0 + GPIO_CON, UAIF0_PINS_MASK, UAIF0_PINS_FUNC);
+ 	(void)poke_bits(&gpio, "gpb0 PUD", GPIO_GPB0 + GPIO_PUD, UAIF0_PINS_MASK, UAIF0_PINS_PUD);
+ 	rec_pins_set = true;
+-	(void)poke_bits(&pmu, "PAD_RETENTION_ABOX_OPTION", PMU_PAD_RETENTION_ABOX, PMU_PAD_RELEASE, PMU_PAD_RELEASE);
+-	(void)poke_bits(&pmu, "GPIO_MODE_ABOX_SYS_PWR_REG", PMU_GPIO_MODE_ABOX, 1, 1);
++	(void)poke_bits(&pmu, "PAD_RETENTION_AUD_OPTION", PMU_PAD_RETENTION_ABOX, PMU_PAD_RELEASE, PMU_PAD_RELEASE);
+ 	(void)poke(&abox, "UAIF0_CTRL1", ABOX_UAIF_CTRL1(0), uaif1_ctrl1());
+ 	(void)poke_bits(&abox, "UAIF0_CTRL0 (master, DATA_MODE 1, IRQ_MODE 0)", ABOX_UAIF_CTRL0(0),
+ 	    UAIF_MODE_MASTER | UAIF_DATA_MODE | UAIF_IRQ_MODE, UAIF_MODE_MASTER | UAIF_DATA_MODE);
+@@ -1727,7 +1746,7 @@ step_rec(void)
+ 		uint32_t pos;
+ 
+ 		s = rd(&abox, W1(RDMA_STATUS));
+-		pos = (RDMA_RBUF_OFFSET(s) + RDMA_RBUF_CNT(s)) & ~3u;
++		pos = (RDMA_RBUF_PERIOD(s) * REC_PERIOD_BYTES + RDMA_RBUF_CNT(s)) & ~3u;
+ 		if (pos >= REC_RING_BYTES) {
+ 			say("abox: rec: WDMA1's position %#x is outside the ring (STATUS %#x): stopping\n", pos, s);
+ 			break;
+@@ -1873,7 +1892,7 @@ live_stop(const char *why)
+ static void
+ live_follow(void)
+ {
+-	uint32_t status = rd(&abox, W1(RDMA_STATUS)), pos = (RDMA_RBUF_OFFSET(status) + RDMA_RBUF_CNT(status)) & ~3u;
++	uint32_t status = rd(&abox, W1(RDMA_STATUS)), pos = (RDMA_RBUF_PERIOD(status) * REC_PERIOD_BYTES + RDMA_RBUF_CNT(status)) & ~3u;
+ 
+ 	if (pos >= REC_RING_BYTES) {
+ 		say("abox: mic: WDMA1's position %#x is outside the ring (STATUS %#x): stopping\n", pos, status);
+@@ -2010,12 +2029,10 @@ put_back(void)
+ 	}
+ 	if (pins_set) {
+ 		(void)poke_bits(&gpio, "gpb1 CON (idle)", GPIO_GPB1 + GPIO_CON, UAIF1_PINS_MASK, UAIF1_PINS_IDLE);
+-		/* abox_pad_retention(true): GPIO_MODE's bit 0, so that the pads are held through the power-down */
+-		(void)poke_bits(&pmu, "GPIO_MODE_ABOX_SYS_PWR_REG", PMU_GPIO_MODE_ABOX, 1, 1);
+ 	}
+ 	if (powered_here && !rdma_on) {
+-		(void)poke_bits(&pmu, "AUD_CONFIGURATION (off)", PMU_AUD_CONFIGURATION, 0xF, 0);
+-		say("abox: the AUD domain %s after %llu us\n", wait_bits(&pmu, PMU_AUD_STATUS, 0xF, 0, 10000, &took) ? "is off" :
++		(void)poke_bits(&pmu, "AUD_CONFIGURATION (off)", PMU_AUD_CONFIGURATION, PMU_AUD_MASK, 0);
++		say("abox: the AUD domain %s after %llu us\n", wait_bits(&pmu, PMU_AUD_STATUS, PMU_AUD_MASK, 0, 10000, &took) ? "is off" :
+ 		    "has NOT gone off", took);
+ 	}
+ }
+@@ -2225,7 +2242,7 @@ console_state(void)
+ 
+ 	say("abox> AUD_STATUS %#x, ABOX_CPU_CONFIGURATION %#x STATUS %#x; a run %s\n", aud, rd(&pmu, PMU_ABOX_CPU_CONFIG),
+ 	    rd(&pmu, PMU_ABOX_CPU_STATUS), busy ? "is going on" : "is not going on");
+-	if ((aud & 0xF) != 0xF) {
++	if ((aud & PMU_AUD_MASK) != PMU_AUD_MASK) {
+ 		say("abox> the AUD domain is not on: nothing of the block is read\n");
+ 		return;
+ 	}
+@@ -2315,7 +2332,7 @@ hakios_abox_console(const char *arg)
+ 			say("abox> %s BLOCK OFF ...: BLOCK one of abox, mmu, cmu, sysreg, gpio, pmu; OFF a word inside it\n", verb);
+ 			return;
+ 		}
+-		if (b != &pmu && (rd(&pmu, PMU_AUD_STATUS) & 0xF) != 0xF) {
++		if (b != &pmu && (rd(&pmu, PMU_AUD_STATUS) & PMU_AUD_MASK) != PMU_AUD_MASK) {
+ 			say("abox> the AUD domain is off: %s not read\n", b->name);
+ 			return;
+ 		}
+diff --git a/drivers/audio/codec/hakios.max98512.c b/drivers/audio/codec/hakios.max98512.c
+index cf5edc6..c12ad12 100644
+--- a/drivers/audio/codec/hakios.max98512.c
++++ b/drivers/audio/codec/hakios.max98512.c
+@@ -1,906 +1,432 @@
+-#define HAKIOS_SOC_FIXED
+ /*
+- * The Galaxy S9's speakers (starlte, Exynos 9810): two Maxim MAX98512 amplifiers, 0x39 and 0x3A on the HSI2C of USI07 of
+- * PERIC1 (0x108C0000), fed over I2S by UAIF1 of ABOX, the SoC's audio block, which drives both clocks. Only with boot-arg
+- * max98512=N on this phone (the SoC's registers at 0x10000000). Every address and number below is this phone's.
++ * Silicon Mitus SMA1303 boosted Class-D speaker amplifier for Samsung Galaxy A21s (SM-A217F, Exynos 850 / S5E3830).
++ * Connected on i2c_3 (GPIO_PERIC 0x139B0000 bank GPP1 @ +0x0040: gpp1-0 SDA, gpp1-1 SCL) at 7-bit I2C slave 0x1E,
++ * fed by ABOX UAIF1 I2S master (48 kHz, 2 x 16-bit Philips I2S, BCLK = 1.536 MHz -> internal PLL 24.576 MHz).
+  *
+- * The bus (the phone's device tree: hsi2c@108C0000, alias hsi2c18, and what its clocks and pins name): the controller at
+- * 0x108C0000, its input clock 200 MHz (default-clk), 400 kHz (no clock-frequency: i2c-exynos5.c's fast mode); its clocks
+- * USI07 and GATE_USI07 of CMU_PERIC1 (0x10800000): the gates GATE_CLK_PERIC1_USI07_USI +0x203C,
+- * RSTnSYNC_CLK_PERIC1_USI07_USI +0x2094, USI07_USI's IPCLK +0x20E4 and PCLK +0x20E8, the Q-channel +0x3038, the divider
+- * +0x181C (7 bits), PERIC1's IP mux +0x0120; the USI's mode word usi@10811024 (usi_v2_mode "i2c": the words go two to a
+- * USI from USI06's at 0x1081101C, as USI10's at 0x1081103C is the flashlight's bus); SCL gpp4-4 and SDA gpp4-5, function
+- * 2 (hsi2c18-bus), in PERIC1's GPIO (0x10830000, bank gpp4 at +0: CON [23:16]).
+- *
+- * The amplifiers (max98512@39 under it): one codec of Android's over two chips, the main one at 0x39 (maxim,sub_reg 0x3A
+- * the other, maxim,mono_stereo 1). In the stereo mode 0x39 plays I2S channel 0 (PCM_RX_EN_A 0x01, PCM_TO_SPK_MONOMIX_A
+- * and _B 0x00 0x00) and 0x3A channel 1 (0x02, 0x41 0x01). Which speaker each drives is not in the tree; that 0x39 is the
+- * top one (the earpiece, a speaker in stereo) is read from the driver: its receiver gain ("Rcv Digital Gain") is set on
+- * 0x39 alone, its mono mode on 0x39 plays at the receiver's gain, and its brownout current limit for 0x39 (0x16) is the
+- * lower (0x3E for 0x3A; the tree sets neither). No reset or enable pin and no supply in the tree: the node's pins are the
+- * bus's (max98512-i2c: gpp4-4/5, their pull in power-down) and the two interrupts' (amp-int: gpm2-0 and gpm3-0 of CMGP),
+- * left alone here (nothing waits on them). maxim,registers-of-amp and maxim,vmon_slot are read by nothing in the driver;
+- * there are no vmon/imon slot numbers, so the IV sense would be the driver's own (slot 0 for 0x39, 1 for 0x3A,
+- * interleaved: interleave_mode 1), and it stays off here.
+- *   Two revisions, with different maps: REV_ID (0x0402) at 0x40 or above is the first, else REV_ID at 0x0600 at 0x40 or
+- *   above is the "B", whose registers from 0x20 sit elsewhere (address(): +3, +1, +2, -2, -18, -13 by range;
+- *   GLOBAL_SHDN 0x0500, SOFT_RESET 0x0501). Addresses are 16 bits (the high byte first), values 8.
+- *
+- * The format (the machine driver exynos9810_madera.c, its UAIF1 link): SND_SOC_DAIFMT_I2S | NB_NF | CBS_CFS, I2S with
+- * neither clock inverted and the amplifiers slaves of both. ABOX's side (abox_if.c: abox_uaif_set_fmt, _hw_params) is
+- * WS_MODE 0, BCLK_POLARITY 1, WS_POLAR 0, MODE 1 (master), SBIT_MAX the width less one and BCLK = rate * channels *
+- * width, the width and the channels being ABOX's (abox_hw_params_fixup_helper). In the MAX98512 (max98512_dai_set_fmt,
+- * _dai_hw_params, _set_clock): PCM_MASTER_MODE [1:0] 0, PCM_MODE_CFG [2] 0 (the BCLK edge), [5:3] 0 (I2S), [7:6] the
+- * width (1 16, 2 24, 3 32 bits), PCM_CLK_SETUP [3:0] the BCLKs a frame (2 32, 3 48, 4 64), PCM_SR_SETUP1 [3:0] and
+- * PCM_SR_SETUP2 [7:4] 8 (48 kHz), PCM_SR_SETUP2 [3:0] 5 (24 kHz, the IV ADC's when interleaved), SPK_SRC_SEL [1:0] 0
+- * (the PCM input), PDM_RX_CTRL [0] 0.
+- *
+- * What is written, in what order (the first revision's numbering; in Android's order, in which each register goes to
+- * 0x39 and then to 0x3A):
+- *   configure: start()'s steps 1-3 when not done already for its width, and max98512=2 at boot (as for 48 kHz, 2 x 16 bits)
+- *     GLOBAL_SHDN 0; SOFT_RESET 1, then REV_ID answering again and GLOBAL_SHDN [0], AMP_EN [0] reading 0
+- *       (max98512_probe: its software reset; the shutdown before it is this driver's)
+- *     MEAS_EN 0 (the IV sense off: Android turns it on for DSM, which does not run here); PCM_TX_HIZ_CTRL_A/B 0xFF;
+- *       MONOMIX_A/B (above); AMP_VOL_CTRL the level (below) and SPK_GAIN 0, muted (Android's probe: 0x40 and 5);
+- *       AMP_DSP_CFG 0x01 (the DC blocker, the volume ramp); MEAS_DSP_CFG 0xF7; BOOST_CTRL0 0x1C (10 V), BOOST_CTRL1
+- *       0x3E, BOOST_CTRL3 0x01; MEAS_ADC_CFG 0x07, MEAS_ADC_BASE 0x00 0x0B, ADC_CH0-2_DIVIDE 2, ADC_CH0-2_FILT_CFG 0x0C;
+- *       SQUELCH 0x10; BROWNOUT_EN 0x07, LVL_HOLD 0xFF, LVL1-3_THRESH 0xA0 0x30 0x10, THRESH_HYSTERYSIS 0x0F,
+- *       AMP_LIMITER_ATK_REL 0x76; LVL1-3_CUR_LIMIT 0x16 (0x39) and 0x3E (0x3A) with LVL1-3_AMP1_CTRL1 6, 9, 12 and
+- *       CTRL2-3 0, LVL4_CUR_LIMIT 0, LVL4_AMP1_CTRL1 0; ENV_TRACK_VOUT_HEADROOM 0x0A, ENV_TRACK_CTRL 0x01;
+- *       BOOST_BYPASS_1 0x05, _2 0x00 (automatic bypass) when the top one is a B and 0x02 (off) when not, _3 0x01
+- *       (max98512_probe; its write of 0x10 to ENV_TRACK_BOOST_VOUT_READ, a reading by its name and volatile in B's
+- *       map, is left out)
+- *     PCM_TX_HIZ_CTRL_A 0xFF, PCM_TX_EN_A/B 0: nothing sent back on the bus (max98512_reinit_reg; adc_config's IV
+- *       slots are not opened); CLK_MON 0
+- *     with a B among them: INT_EN1, INT_EN2, IRQ_CTRL 0, PCM_MASTER_MODE 0, PCM_CLK_SETUP 0x22, SSM_CFG 0x05,
+- *       BROWNOUT_AMP_GAIN_ATK_REL 0, ENV_TRACK_BOOST_VOUT_DELAY, _REL_RATE, _HOLD_RATE 0 (max98512_probe)
+- *     the format, above (max98512_dai_set_fmt, max98512_dai_hw_params, max98512_set_clock)
+- *   unmute: start()'s steps 4-6 (max98512_dai_mute_stream -> __max98512_spk_enable, the stereo mode)
+- *     SPK_GAIN [2:0] and AMP_VOL_CTRL [6:0], the level; MEAS_EN [1:0] 0; BROWNOUT_LVL2/3_THRESH 0x30 0x10 (0x40 0x20
+- *     with the battery at 5 C or under: Android compares tenths of a degree with 50); BOOST_BYPASS_2 again; then 0x39's
+- *     PCM_RX_EN_A, MONOMIX_A/B, AMP_EN [0] 1, AMP_EN [7:6] 2 (DEM), GLOBAL_SHDN [0] 1, and the same for 0x3A
+- *   mute: stop() (max98512_spk_enable(0))
+- *     GLOBAL_SHDN [0] 0, AMP_EN [0] 0, MEAS_EN [1:0] 0, then 15 ms with the clocks still running, for the ramp down
+- *
+- * The level. Android's speaker is +15 dB (maxim,spk-gain 5; SPK_GAIN [2:0] is 0 mute, then +3 to +18 dB in 3 dB steps) at
+- * 0 dB digital (0x40; AMP_VOL_CTRL [6:0] is -16 dB and 0.25 dB a step), its receiver +3 dB at -3 dB (maxim,spk-gain-rcv
+- * 1, maxim,digital-gain-rcv 0x34). Here both start at the receiver's level, 15 dB under Android's speaker.
+- * max98512_gain=N raises the bottom one (1 to 5: +3 to +15 dB); the top one stays at the receiver's, being the earpiece.
+- * Nothing ever sets more than SPK_GAIN 5 at 0 dB: the allow-list caps both registers (and BOOST_CTRL0 at Android's 10 V).
+- *
+- * The speakers' protection. Android's is Maxim's DSM on ABOX's DSP (dsm.bin), from the amplifiers' current and voltage
+- * sense. None of that runs here, so the IV sense stays off, and what is left is the amplifiers' own (the DC blocker, the
+- * brownout limiter, the boost's current limit, their thermal shutdown), the low level above, and whatever the feeder of
+- * UAIF1 does to the samples: drivers/audio/hakios.guard.c (the POCO's: a high-pass, power and peak limits) is not in
+- * this path; it would have to be built for the S9 and run on what is fed to UAIF1.
+- *
+- * Every write goes through one function that takes only the registers above (rules[]), none beyond its largest value,
+- * and reads it back; a write that does not read back, or a bus that fails, ends writing for the run: both amplifiers
+- * are shut down (GLOBAL_SHDN, AMP_EN) and start() refuses from then on. Waits are by the clock (deadline_us), not
+- * delay(), which may sleep a tick. One transfer at a time (bus_lock), one start, stop or step at a time (amp_lock).
+- *
+- *   max98512=1    a look: the bus brought up (its clocks, the USI, the pins), both chips' revisions and registers;
+- *                 nothing is written to them
+- *   max98512=2    ... and both set up as for 48 kHz, 2 x 16 bits, shut down and muted; their registers again
+- *   max98512=3    ... and both handed to ABOX (hakios_abox_set_amp): UAIF1's start turns them on, its stop off
+- *   max98512_gain=N  the bottom speaker's gain at start, 1 to 5 (+3 to +15 dB; 1); the top one's is always 1
+- *
+- * Started on its own (STARTUP, as hakios.thermal.c is), not from hakios.input.c: that file is one of patch 1203's.
+- *
+- * Sources: the phone's device tree (hsi2c@108C0000 and max98512@39, usi@10811024, the hsi2c18-bus, max98512-i2c and
+- * amp-int pins, the sound node's uaif@1, abox_uaif@1), Samsung's max98512.c and max98512.h, exynos9810_madera.c, abox.c
+- * and abox_if.c, maxim_dsm_cal.c (the battery's temperature), i2c-exynos5.c, pinctrl-exynos.c (exynos9810_pin_banks7),
+- * the Exynos 9810's CMU tables (cal-if/exynos9810/cmucal-sfr.c) and include/dt-bindings/clock/exynos9810.h of the S9's
+- * kernel (GPL: read for these facts, not copied).
++ * Boot-args:
++ *   sma1303=N (or max98512=N): 1 = probe chip ID/status only, 2 = soft-reset + program 48 kHz I2S defaults (muted),
++ *                              3 = register with ABOX's UAIF1 speaker path (hakios_abox_set_amp).
++ *   sma1303_vol=V:             8-bit digital volume register 0x0A (0x30 = 0 dB, 0x31 = -0.5 dB default; 0.5 dB/step).
+  */
+ #include <kern/clock.h>
+-#include <kern/locks.h>
+-#if !__has_include(<vm/vm_kern_xnu.h>)   /* xnu-8796: STARTUP macro */
+-#include <kern/startup.h>
+-#endif
+-#include <kern/thread.h>
+ #include <libkern/libkern.h>
+ #include <mach/mach_time.h>
+ #include <mach/mach_types.h>
+ #include <pexpert/pexpert.h>
++#include <stdbool.h>
++#include <stdint.h>
+ #include <sys/errno.h>
+-#include <sys/hakios.exynos_hsi2c.h>
+-#if !__has_include(<vm/vm_kern_xnu.h>)   /* xnu-8796 only */
+-#include <sys/hakios.input.h>
+-#endif
+-#include <sys/hakios.max98512.h>
+-#include <sys/systm.h>
+-#include <sys/hakios.exynos_soc.h>
+-#if __has_include(<vm/vm_kern_xnu.h>)   /* xnu-12377: ABOX driver is in this kernel; no hakios.drivers.h */
+-#define HAKIOS_EXYNOS_ABOX      1
+-#else
+-#include "hakios.drivers.h"      /* HAKIOS_EXYNOS_ABOX: ABOX's driver in this kernel */
+-#endif
++#include <sys/hakios.exynos_abox.h>
+ #include <sys/hakios.log.h>
++#include <sys/hakios.max98512.h>
+ #include <sys/hakios.xnu.h>
++#include <sys/systm.h>
+ 
++#define GPIO_PERIC_PA           0x139B0000UL
++#define GPIO_PERIC_SIZE         0x1000UL
++#define GPP1_OFFSET             0x0040U         /* pin_banks5[2]: gpg0=0x00, gpp0=0x20, gpp1=0x40 */
++#define GPIO_CON                0x00U
++#define GPIO_DAT                0x04U
++#define GPIO_PUD                0x08U
++#define GPIO_DRV                0x0CU
+ 
+-/* the registers, in the first revision's numbering (a B's: address()) */
+-#define INT_EN1                 0x0A
+-#define INT_EN2                 0x0B
+-#define IRQ_CTRL                0x10
+-#define CLK_MON                 0x11
+-#define PCM_RX_EN_A             0x18
+-#define PCM_TX_EN_A             0x1A
+-#define PCM_TX_EN_B             0x1B
+-#define PCM_TX_HIZ_CTRL_A       0x1C
+-#define PCM_TX_HIZ_CTRL_B       0x1D
+-#define PCM_MODE_CFG            0x20
+-#define PCM_MASTER_MODE         0x21
+-#define PCM_CLK_SETUP           0x22
+-#define PCM_SR_SETUP1           0x23
+-#define PCM_SR_SETUP2           0x24
+-#define MONOMIX_A               0x25    /* PCM_TO_SPK_MONOMIX_A */
+-#define MONOMIX_B               0x26
+-#define PDM_RX_CTRL             0x34
+-#define AMP_VOL_CTRL            0x35
+-#define AMP_DSP_CFG             0x36
+-#define AMP_EN                  0x38
+-#define SPK_SRC_SEL             0x39
+-#define SPK_GAIN                0x3A
+-#define SSM_CFG                 0x3B
+-#define MEAS_EN                 0x3C
+-#define MEAS_DSP_CFG            0x3D
+-#define BOOST_CTRL0             0x3E
+-#define BOOST_CTRL3             0x3F
+-#define BOOST_CTRL1             0x40
+-#define MEAS_ADC_CFG            0x41
+-#define MEAS_ADC_BASE_MSB       0x42
+-#define MEAS_ADC_BASE_LSB       0x43
+-#define ADC_CH0_DIVIDE          0x44    /* CH1 0x45, CH2 0x46 */
+-#define ADC_CH0_FILT_CFG        0x47    /* CH1 0x48, CH2 0x49 */
+-#define SQUELCH                 0x4E
+-#define BROWNOUT_EN             0x50
+-#define BROWNOUT_LVL_HOLD       0x53
+-#define BROWNOUT_LVL1_THRESH    0x58
+-#define BROWNOUT_LVL2_THRESH    0x59
+-#define BROWNOUT_LVL3_THRESH    0x5A
+-#define BROWNOUT_HYSTERESIS     0x5C
+-#define BROWNOUT_LIMITER        0x5D    /* BROWNOUT_AMP_LIMITER_ATK_REL */
+-#define BROWNOUT_GAIN_ATK_REL   0x5E
+-#define BROWNOUT_LVL1_CUR_LIMIT 0x70    /* then its AMP1_CTRL1-3; level 2 at 0x74, 3 at 0x78, 4 at 0x7C */
+-#define ENV_HEADROOM            0x80    /* ENV_TRACK_VOUT_HEADROOM */
+-#define ENV_VOUT_DELAY          0x81
+-#define ENV_REL_RATE            0x82
+-#define ENV_HOLD_RATE           0x83
+-#define ENV_CTRL                0x84
+-#define BOOST_BYPASS_1          0x86
+-#define BOOST_BYPASS_2          0x87
+-#define BOOST_BYPASS_3          0x88
+-#define GLOBAL_SHDN             0x400
+-#define GLOBAL_EN_US            50000   /* how long GLOBAL_SHDN [0] may take to read 1 after it is written */
+-#define SOFT_RESET              0x401
+-#define REV_ID                  0x402
+-#define REV_ID_B                0x600   /* a B's REV_ID, where it is in the chip */
+-#define REV_ID_LEAST            0x40    /* a revision below this is not one */
+-
+-#define SR_48000                0x8     /* PCM_SR_SETUP1 [3:0], PCM_SR_SETUP2 [7:4] */
+-#define SR_IV_24000             0x5     /* PCM_SR_SETUP2 [3:0], interleaved */
+-
+-#define GAIN_RECEIVER           1       /* SPK_GAIN [2:0]: +3 dB, maxim,spk-gain-rcv */
+-#define GAIN_SPEAKER            5       /* +15 dB, maxim,spk-gain: Android's speaker, the most ever set */
+-#define VOL_RECEIVER            0x34    /* AMP_VOL_CTRL [6:0]: -3 dB, maxim,digital-gain-rcv */
+-#define VOL_MOST                0x40    /* 0 dB, Android's speaker */
+-#define BOOST_MOST              0x1C    /* BOOST_CTRL0: 10 V, Android's */
+-
+-#define TRIES                   3       /* a transfer tried three times, as Android's driver does (MAX_TRY_COUNT) */
+-#define RESET_US                50000u  /* the most a software reset is given before the chip answers again */
+-#define RAMP_US                 16000u  /* after a mute: Android's 15 to 16 ms, the clocks still running */
+-
+-static struct hakios_hsi2c bus = {
+-	.name = "max98512",
+-	.regs_pa = EXYNOS_PERIC1_USI07_HSI2C0_PA,                  /* hsi2c@108C0000: USI07 of PERIC1 */
+-	.usi_mode_pa = EXYNOS_PERIC1_USI07_MODE_PA,              /* usi@10811024: its mode word */
+-	.cmu_pa = EXYNOS_CMU_PERIC1_PA, .cmu_size = 0x4000,       /* CMU_PERIC1 */
+-	.gates = { 0x203C, 0x2094, 0x20E4, 0x20E8 }, .ngates = 4,
+-	.qch = 0x3038, .div = 0x181C, .mux = 0x0120,
+-	.pins_pa = EXYNOS_GPIO_PERIC1_PA,                  /* PERIC1's GPIO, bank gpp4: SCL pin 4, SDA pin 5 */
+-	.pins_mask = 0xffu << 16, .pins_want = 0x22u << 16,
+-	.ipclk_mhz = 200, .bus_hz = 400000,
+-};
++#define SMA1303_ADDR            0x1EU
++#define SMA1303_DEFAULT_VOL     0x31U           /* -0.5 dB (DT init-vol = <0x31>) */
++#define I2C_HALF_US             3U
+ 
+-static struct amp {
+-	const char *name;
+-	uint8_t addr;
+-	uint8_t rx_en, monomix_a, monomix_b;    /* its I2S channel, as Android's stereo mode sets it */
+-	uint8_t current_limit;                  /* BROWNOUT_LVL1-3_CUR_LIMIT */
+-	uint8_t gain, vol;                      /* its level: SPK_GAIN [2:0], AMP_VOL_CTRL [6:0] */
+-	bool b;                                 /* a MAX98512B, with its own map */
+-	uint8_t revision;
+-} amps[2] = {
+-	{ .name = "top", .addr = 0x39, .rx_en = 0x01, .monomix_a = 0x00, .monomix_b = 0x00, .current_limit = 0x16,
+-	  .gain = GAIN_RECEIVER, .vol = VOL_RECEIVER },
+-	{ .name = "bottom", .addr = 0x3A, .rx_en = 0x02, .monomix_a = 0x41, .monomix_b = 0x01, .current_limit = 0x3E,
+-	  .gain = GAIN_RECEIVER, .vol = VOL_RECEIVER },
+-};
++static vm_offset_t gpp1_va;
++static uint8_t init_vol = SMA1303_DEFAULT_VOL;
++static volatile bool amp_on;
++static volatile bool chip_ready;
++static unsigned start_count;
+ 
+-/*
+- * What may be written: every register this driver writes, and nothing else. `check' the bits a read-back must show as
+- * written (0: SOFT_RESET, which clears itself); a value whose `capped' bits are above `cap' is refused (the gains, the
+- * boost, the IV sense and the bus's transmit slots, which are never turned on).
+- */
+-static const struct rule {
+-	uint16_t reg;
+-	uint8_t check, capped, cap;
+-} rules[] = {
+-	{ INT_EN1, 0xff, 0, 0 }, { INT_EN2, 0xff, 0, 0 }, { IRQ_CTRL, 0xff, 0, 0 }, { CLK_MON, 0xff, 0, 0 },
+-	{ PCM_RX_EN_A, 0xff, 0, 0 }, { PCM_TX_EN_A, 0xff, 0xff, 0 }, { PCM_TX_EN_B, 0xff, 0xff, 0 },
+-	{ PCM_TX_HIZ_CTRL_A, 0xff, 0, 0 }, { PCM_TX_HIZ_CTRL_B, 0xff, 0, 0 },
+-	{ PCM_MODE_CFG, 0xff, 0, 0 }, { PCM_MASTER_MODE, 0xff, 0, 0 }, { PCM_CLK_SETUP, 0xff, 0, 0 },
+-	{ PCM_SR_SETUP1, 0xff, 0, 0 }, { PCM_SR_SETUP2, 0xff, 0, 0 }, { MONOMIX_A, 0xff, 0, 0 }, { MONOMIX_B, 0xff, 0, 0 },
+-	{ PDM_RX_CTRL, 0xff, 0, 0 },
+-	{ AMP_VOL_CTRL, 0xff, 0xff, VOL_MOST },         /* 0 dB at most, the volume location bit clear */
+-	{ AMP_DSP_CFG, 0xff, 0, 0 }, { AMP_EN, 0xff, 0, 0 }, { SPK_SRC_SEL, 0xff, 0, 0 },
+-	{ SPK_GAIN, 0xff, 0x77, GAIN_SPEAKER },         /* +15 dB at most, the PDM gain [6:4] 0 */
+-	{ SSM_CFG, 0xff, 0, 0 },
+-	{ MEAS_EN, 0xff, 0x03, 0 },                     /* the IV sense: off only */
+-	{ MEAS_DSP_CFG, 0xff, 0, 0 },
+-	{ BOOST_CTRL0, 0xff, 0xff, BOOST_MOST },        /* 10 V at most, PVDD's bit clear */
+-	{ BOOST_CTRL3, 0xff, 0, 0 }, { BOOST_CTRL1, 0xff, 0, 0 },
+-	{ MEAS_ADC_CFG, 0xff, 0, 0 }, { MEAS_ADC_BASE_MSB, 0xff, 0, 0 }, { MEAS_ADC_BASE_LSB, 0xff, 0, 0 },
+-	{ ADC_CH0_DIVIDE, 0xff, 0, 0 }, { ADC_CH0_DIVIDE + 1, 0xff, 0, 0 }, { ADC_CH0_DIVIDE + 2, 0xff, 0, 0 },
+-	{ ADC_CH0_FILT_CFG, 0xff, 0, 0 }, { ADC_CH0_FILT_CFG + 1, 0xff, 0, 0 }, { ADC_CH0_FILT_CFG + 2, 0xff, 0, 0 },
+-	{ SQUELCH, 0xff, 0, 0 }, { BROWNOUT_EN, 0xff, 0, 0 }, { BROWNOUT_LVL_HOLD, 0xff, 0, 0 },
+-	{ BROWNOUT_LVL1_THRESH, 0xff, 0, 0 }, { BROWNOUT_LVL2_THRESH, 0xff, 0, 0 }, { BROWNOUT_LVL3_THRESH, 0xff, 0, 0 },
+-	{ BROWNOUT_HYSTERESIS, 0xff, 0, 0 }, { BROWNOUT_LIMITER, 0xff, 0, 0 }, { BROWNOUT_GAIN_ATK_REL, 0xff, 0, 0 },
+-	{ 0x70, 0xff, 0, 0 }, { 0x71, 0xff, 0, 0 }, { 0x72, 0xff, 0, 0 }, { 0x73, 0xff, 0, 0 },
+-	{ 0x74, 0xff, 0, 0 }, { 0x75, 0xff, 0, 0 }, { 0x76, 0xff, 0, 0 }, { 0x77, 0xff, 0, 0 },
+-	{ 0x78, 0xff, 0, 0 }, { 0x79, 0xff, 0, 0 }, { 0x7A, 0xff, 0, 0 }, { 0x7B, 0xff, 0, 0 },
+-	{ 0x7C, 0xff, 0, 0 }, { 0x7D, 0xff, 0, 0 },
+-	{ ENV_HEADROOM, 0xff, 0, 0 }, { ENV_VOUT_DELAY, 0xff, 0, 0 }, { ENV_REL_RATE, 0xff, 0, 0 },
+-	{ ENV_HOLD_RATE, 0xff, 0, 0 }, { ENV_CTRL, 0xff, 0, 0 },
+-	{ BOOST_BYPASS_1, 0xff, 0, 0 }, { BOOST_BYPASS_2, 0xff, 0, 0 }, { BOOST_BYPASS_3, 0xff, 0, 0 },
+-	{ GLOBAL_SHDN, 0x01, 0, 0 }, { SOFT_RESET, 0x00, 0xff, 0x01 },
+-};
+-
+-static LCK_GRP_DECLARE(max98512_lock_group, "max98512");
+-static LCK_MTX_DECLARE(bus_lock, &max98512_lock_group);        /* one transfer at a time */
+-static LCK_MTX_DECLARE(amp_lock, &max98512_lock_group);        /* one start, stop or step at a time; the state below */
+-static bool broken;             /* a write did not read back, or the bus failed: no more writing (but to shut down) */
+-static bool playing;            /* unmuted by start(), until stop() */
+-static uint32_t configured_bits;  /* configure() done for this width and nothing written since but mute/unmute: 0 none */
+-static unsigned starts, refusals;
+-
+-/* a moment `us' microseconds from now, by the clock: a loop bounded by it spins, where delay() would sleep a tick */
+-static uint64_t
+-deadline_us(uint64_t us)
++static void
++spin_us(uint64_t us)
+ {
+-	uint64_t interval;
++	uint64_t interval, deadline;
+ 
+ 	nanoseconds_to_absolutetime(us * NSEC_PER_USEC, &interval);
+-	return mach_absolute_time() + interval;
+-}
+-
+-/* a register's address in the chip: the first revision's numbering, moved for a B (max98512_remap_reg's ranges) */
+-static uint16_t
+-address(const struct amp *a, uint16_t reg)
+-{
+-	if (!a->b || reg < 0x20) {
+-		return reg;
+-	}
+-	if (reg <= 0x28) {
+-		return reg + 3;
+-	}
+-	if (reg >= 0x2B && reg <= 0x4C) {
+-		return reg + 1;
+-	}
+-	if (reg >= 0x4F && reg <= 0x53) {
+-		return reg + 2;
+-	}
+-	if (reg >= 0x58 && reg <= 0x5F) {
+-		return reg - 2;
+-	}
+-	if (reg >= 0x70 && reg <= 0x7F) {
+-		return reg - 18;
++	deadline = mach_absolute_time() + interval;
++	while (mach_absolute_time() < deadline) {
+ 	}
+-	if (reg >= 0x80 && reg <= 0x8D) {
+-		return reg - 13;
+-	}
+-	if (reg == GLOBAL_SHDN || reg == SOFT_RESET) {
+-		return reg + 0x100;
+-	}
+-	if (reg == REV_ID) {
+-		return REV_ID_B;
+-	}
+-	return reg;
+ }
+ 
+-/* ---- the bus: 16-bit addresses, high byte first ---- */
+-
+-static uint32_t
+-raw_write(const struct amp *a, uint16_t at, uint8_t value)
++static inline uint32_t
++gpp1_rd(uint32_t reg)
+ {
+-	uint32_t error = 1;
+-
+-	for (int i = 0; i < TRIES && error != 0; i++) {
+-		uint8_t buf[3] = { (uint8_t)(at >> 8), (uint8_t)at, value };
+-
+-		if (i > 0) {
+-			delay_for_interval(1, NSEC_PER_MSEC);
+-		}
+-		lck_mtx_lock(&bus_lock);
+-		error = hakios_hsi2c_message(&bus, a->addr, false, buf, sizeof(buf), true);
+-		lck_mtx_unlock(&bus_lock);
+-	}
+-	return error;
++	return *(volatile uint32_t *)(gpp1_va + reg);
+ }
+ 
+-static uint32_t
+-raw_read(const struct amp *a, uint16_t at, uint8_t *value)
++static inline void
++gpp1_wr(uint32_t reg, uint32_t val)
+ {
+-	uint32_t error = 1;
+-
+-	for (int i = 0; i < TRIES && error != 0; i++) {
+-		uint8_t buf[2] = { (uint8_t)(at >> 8), (uint8_t)at };
+-
+-		if (i > 0) {
+-			delay_for_interval(1, NSEC_PER_MSEC);
+-		}
+-		lck_mtx_lock(&bus_lock);
+-		error = hakios_hsi2c_message(&bus, a->addr, false, buf, sizeof(buf), false);
+-		if (error == 0) {
+-			error = hakios_hsi2c_message(&bus, a->addr, true, value, 1, true);
+-		}
+-		lck_mtx_unlock(&bus_lock);
+-	}
+-	return error;
++	*(volatile uint32_t *)(gpp1_va + reg) = val;
++	__builtin_arm_dsb(0xf);
+ }
+ 
+-static uint32_t
+-get(const struct amp *a, uint16_t reg, uint8_t *value)
++/* Open-drain GPIO bit-bang on GPP1[0] (SDA) and GPP1[1] (SCL) */
++static inline void
++sda_hi(void)
+ {
+-	return raw_read(a, address(a, reg), value);
++	gpp1_wr(GPIO_CON, gpp1_rd(GPIO_CON) & ~0x0FU);          /* input, pulled high */
+ }
+ 
+-static const struct rule *
+-rule_for(uint16_t reg)
++static inline void
++sda_lo(void)
+ {
+-	for (unsigned i = 0; i < sizeof(rules) / sizeof(rules[0]); i++) {
+-		if (rules[i].reg == reg) {
+-			return &rules[i];
+-		}
+-	}
+-	return NULL;
++	gpp1_wr(GPIO_DAT, gpp1_rd(GPIO_DAT) & ~0x01U);
++	gpp1_wr(GPIO_CON, (gpp1_rd(GPIO_CON) & ~0x0FU) | 0x01U);/* output low */
+ }
+ 
+-/*
+- * The one way a register is written: a register of rules[] alone, within its cap, read back (`check': the bits that
+- * must read back as written). A refusal or a failure ends writing for the run; `even_broken' is shutting down, which
+- * goes on regardless.
+- */
+-static bool
+-write_checked(const struct amp *a, uint16_t reg, uint8_t value, uint8_t check, bool even_broken)
++static inline int
++sda_in(void)
+ {
+-	const struct rule *r = rule_for(reg);
+-	uint16_t at = address(a, reg);
+-	uint8_t back = 0;
+-	uint32_t error;
+-
+-	if (r == NULL || (value & r->capped) > r->cap) {
+-		say("max98512: %s: register %#x may not be given %#x: refused, and no more writing for this run\n", a->name, reg,
+-		    value);
+-		broken = true;
+-		return false;
+-	}
+-	if (broken && !even_broken) {
+-		return false;
+-	}
+-	error = raw_write(a, at, value);
+-	if (r->check == 0) {
+-		return true;                    /* SOFT_RESET: it clears itself; reset() looks whether it took */
+-	}
+-	if (reg == GLOBAL_SHDN && (value & 1)) {
+-		delay_for_interval(2, NSEC_PER_MSEC);
+-	}
+-	if (error == 0) {
+-		error = raw_read(a, at, &back);
+-	}
+-	/*
+-	 * GLOBAL_SHDN [0] reads 1 only once the amplifier is on, which it is when its clock monitor has taken BCLK and LRCLK
+-	 * (just started by ABOX): a moment after the write, not at once. Android never reads it back. Builds 21-22 read 0
+-	 * straight after it and ended the speaker for the run (Safari's videos, ringtones: silence). So it is read again for
+-	 * up to GLOBAL_EN_US; still off is no fault of the bus: start() fails, and the next start() tries again.
+-	 */
+-	/* (and the read itself may fail while it powers up: build 23, bus error 0x400 right after the write) */
+-	if (reg == GLOBAL_SHDN && (value & 0x01) != 0 && (error != 0 || (back & 0x01) == 0)) {
+-		uint32_t first = error;
+-
+-		for (uint64_t deadline = deadline_us(GLOBAL_EN_US); (error != 0 || (back & 0x01) == 0) &&
+-		    mach_absolute_time() < deadline;) {
+-			hakios_hsi2c_reset(&bus);
+-			error = raw_read(a, at, &back);
+-		}
+-		if (first != 0) {
+-			say("max98512: %s (%#x): the global enable's read failed at first (bus %#x), then %s\n", a->name,
+-			    a->addr, first, error == 0 ? "read" : "failed for the whole wait");
+-		}
+-		if (error == 0 && (back & 0x01) == 0) {
+-			say("max98512: %s (%#x): the global enable still reads 0 %u ms after it was written (the clocks not taken?): "
+-			    "this start fails, the next one tries again\n", a->name, a->addr, GLOBAL_EN_US / 1000);
+-			return false;
+-		}
+-	}
+-	if (error != 0 || ((back ^ value) & check & r->check) != 0) {
+-		say("max98512: %s (%#x): register %#x (%#x in the chip): wrote %#x, read back %#x (bus %#x): no more writing "
+-		    "for this run\n", a->name, a->addr, reg, at, value, back, error);
+-		broken = true;
+-		return false;
+-	}
+-	return true;
++	return (gpp1_rd(GPIO_DAT) & 0x01U) ? 1 : 0;
+ }
+ 
+-static bool
+-put(const struct amp *a, uint16_t reg, uint8_t value)
+-{
+-	return write_checked(a, reg, value, 0xff, false);
+-}
+-
+-static bool
+-put_bits(const struct amp *a, uint16_t reg, uint8_t mask, uint8_t value)
++static inline void
++scl_hi(void)
+ {
+-	uint8_t now;
++	uint64_t interval, deadline;
+ 
+-	if (broken) {
+-		return false;
+-	}
+-	if (get(a, reg, &now) != 0) {
+-		say("max98512: %s (%#x): register %#x cannot be read (bus %#x): no more writing for this run\n", a->name, a->addr,
+-		    reg, bus.last_error);
+-		broken = true;
+-		return false;
++	gpp1_wr(GPIO_CON, gpp1_rd(GPIO_CON) & ~0xF0U);          /* input, pulled high */
++	nanoseconds_to_absolutetime(1000ULL * NSEC_PER_USEC, &interval);
++	deadline = mach_absolute_time() + interval;
++	while ((gpp1_rd(GPIO_DAT) & 0x02U) == 0 && mach_absolute_time() < deadline) {
+ 	}
+-	return write_checked(a, reg, (uint8_t)((now & ~mask) | (value & mask)), mask, false);
+ }
+ 
+-/* each register to the top one and then to the bottom one, as Android's driver writes to both */
+-static bool
+-both(uint16_t reg, uint8_t value)
++static inline void
++scl_lo(void)
+ {
+-	return put(&amps[0], reg, value) && put(&amps[1], reg, value);
++	gpp1_wr(GPIO_DAT, gpp1_rd(GPIO_DAT) & ~0x02U);
++	gpp1_wr(GPIO_CON, (gpp1_rd(GPIO_CON) & ~0xF0U) | 0x10U);/* output low */
+ }
+ 
+-static bool
+-both_bits(uint16_t reg, uint8_t mask, uint8_t value)
+-{
+-	return put_bits(&amps[0], reg, mask, value) && put_bits(&amps[1], reg, mask, value);
+-}
+-
+-static bool
+-each(uint16_t reg, uint8_t top, uint8_t bottom)
+-{
+-	return put(&amps[0], reg, top) && put(&amps[1], reg, bottom);
+-}
+-
+-/* bits cleared in both, whatever happened before: the way to silence (an amplifier that does not answer is passed by) */
+ static void
+-clear_both(uint16_t reg, uint8_t mask)
++i2c_bus_init(void)
+ {
+-	for (unsigned i = 0; i < 2; i++) {
+-		uint8_t now = 0;
+-
+-		if (get(&amps[i], reg, &now) != 0) {
+-			say("max98512: %s (%#x): register %#x cannot be read (bus %#x) to be cleared\n", amps[i].name, amps[i].addr,
+-			    reg, bus.last_error);
+-			broken = true;
+-			continue;
++	/* Pull-up (0x3) on gpp1-0 and gpp1-1, drive 0, both lines released high */
++	gpp1_wr(GPIO_PUD, (gpp1_rd(GPIO_PUD) & ~0xFFU) | 0x33U);
++	gpp1_wr(GPIO_DRV, gpp1_rd(GPIO_DRV) & ~0xFFU);
++	gpp1_wr(GPIO_DAT, gpp1_rd(GPIO_DAT) & ~0x03U);
++	gpp1_wr(GPIO_CON, gpp1_rd(GPIO_CON) & ~0xFFU);
++	spin_us(10);
++	if (!sda_in()) {
++		for (int i = 0; i < 9; i++) {
++			scl_lo();
++			spin_us(I2C_HALF_US);
++			scl_hi();
++			spin_us(I2C_HALF_US);
+ 		}
+-		(void)write_checked(&amps[i], reg, (uint8_t)(now & ~mask), mask, true);
++		sda_lo();
++		spin_us(I2C_HALF_US);
++		scl_hi();
++		spin_us(I2C_HALF_US);
++		sda_hi();
++		spin_us(I2C_HALF_US);
+ 	}
+ }
+ 
+-/* ---- the chips ---- */
+-
+-/* which chip answers at an address (max98512_i2c_probe's revision check); false: none this driver knows */
+-static bool
+-identify(struct amp *a)
++static void
++i2c_start(void)
+ {
+-	uint8_t id = 0, id_b = 0;
+-
+-	if (raw_read(a, REV_ID, &id) != 0) {
+-		say("max98512: %s (%#x): no answer (bus %#x)\n", a->name, a->addr, bus.last_error);
+-		return false;
+-	}
+-	if (id >= REV_ID_LEAST) {
+-		a->b = false;
+-		a->revision = id;
+-	} else if (raw_read(a, REV_ID_B, &id_b) == 0 && id_b >= REV_ID_LEAST) {
+-		a->b = true;
+-		a->revision = id_b;
+-	} else {
+-		say("max98512: %s (%#x): REV_ID %#x, and %#x at 0x600: not a MAX98512 this driver knows\n", a->name, a->addr, id,
+-		    id_b);
+-		return false;
+-	}
+-	say("max98512: %s (%#x): MAX98512%s, revision %#x\n", a->name, a->addr, a->b ? "B" : "", a->revision);
+-	return true;
++	sda_hi();
++	scl_hi();
++	spin_us(I2C_HALF_US);
++	sda_lo();
++	spin_us(I2C_HALF_US);
++	scl_lo();
++	spin_us(I2C_HALF_US);
+ }
+ 
+-static bool
+-readable(const struct amp *a, uint16_t at)
++static void
++i2c_stop(void)
+ {
+-	if (a->b) {
+-		return (at >= 0x01 && at <= 0x81) || at == 0x500 || at == 0x501 || at == REV_ID_B;
+-	}
+-	return (at >= 0x01 && at <= 0x28) || (at >= 0x2B && at <= 0x53) || (at >= 0x58 && at <= 0x5F) ||
+-	       (at >= 0x70 && at <= 0x88) || (at >= GLOBAL_SHDN && at <= REV_ID);
++	sda_lo();
++	spin_us(I2C_HALF_US);
++	scl_hi();
++	spin_us(I2C_HALF_US);
++	sda_hi();
++	spin_us(I2C_HALF_US);
+ }
+ 
+-/* `count' registers from `first', as they are in the chip ("--" not readable, "??" no answer) */
+-static void
+-dump_row(const struct amp *a, uint16_t first, unsigned count)
++static bool
++i2c_tx_byte(uint8_t b)
+ {
+-	char line[16 * 3 + 1];
+-	unsigned used = 0;
+-
+-	line[0] = 0;
+-	for (unsigned i = 0; i < count && i < 16; i++) {
+-		uint16_t at = (uint16_t)(first + i);
+-		uint8_t value = 0;
+-
+-		if (!readable(a, at)) {
+-			snprintf(line + used, sizeof(line) - used, " --");
+-		} else if (raw_read(a, at, &value) != 0) {
+-			snprintf(line + used, sizeof(line) - used, " ??");
++	bool ack;
++
++	for (int i = 7; i >= 0; i--) {
++		if ((b >> i) & 1) {
++			sda_hi();
+ 		} else {
+-			snprintf(line + used, sizeof(line) - used, " %02x", (unsigned)value);
++			sda_lo();
+ 		}
+-		used += 3;
+-	}
+-	say("max98512: %s %#06x:%s\n", a->name, (unsigned)first, line);
++		spin_us(I2C_HALF_US);
++		scl_hi();
++		spin_us(I2C_HALF_US);
++		scl_lo();
++	}
++	sda_hi();
++	spin_us(I2C_HALF_US);
++	scl_hi();
++	spin_us(I2C_HALF_US);
++	ack = (sda_in() == 0);
++	scl_lo();
++	spin_us(I2C_HALF_US);
++	return ack;
+ }
+ 
+-static void
+-dump(const struct amp *a, const char *when)
++static uint8_t
++i2c_rx_byte(bool send_ack)
+ {
+-	say("max98512: %s (%#x), %s: its registers, as the chip numbers them\n", a->name, a->addr, when);
+-	for (uint16_t row = 0; row < 0x90; row += 0x10) {
+-		dump_row(a, row, 16);
++	uint8_t b = 0;
++
++	sda_hi();
++	for (int i = 7; i >= 0; i--) {
++		spin_us(I2C_HALF_US);
++		scl_hi();
++		spin_us(I2C_HALF_US);
++		if (sda_in()) {
++			b |= (uint8_t)(1U << i);
++		}
++		scl_lo();
+ 	}
+-	if (a->b) {
+-		dump_row(a, 0x500, 2);
+-		dump_row(a, REV_ID_B, 1);
++	if (send_ack) {
++		sda_lo();
+ 	} else {
+-		dump_row(a, GLOBAL_SHDN, 3);
+-	}
++		sda_hi();
++	}
++	spin_us(I2C_HALF_US);
++	scl_hi();
++	spin_us(I2C_HALF_US);
++	scl_lo();
++	sda_hi();
++	spin_us(I2C_HALF_US);
++	return b;
+ }
+ 
+-/* the software reset (max98512_probe), and the chip answering again in shutdown */
+ static bool
+-reset(const struct amp *a)
++sma_read(uint8_t reg, uint8_t *val)
+ {
+-	uint8_t id = 0, shdn = 0xff, en = 0xff;
+-	uint64_t deadline;
+-
+-	if (!write_checked(a, SOFT_RESET, 0x01, 0, false)) {
+-		return false;
+-	}
+-	for (deadline = deadline_us(RESET_US);;) {
+-		if (get(a, REV_ID, &id) == 0 && id == a->revision) {
+-			break;
++	for (int attempt = 0; attempt < 3; attempt++) {
++		i2c_start();
++		if (!i2c_tx_byte((SMA1303_ADDR << 1) | 0) ||
++		    !i2c_tx_byte(reg)) {
++			i2c_stop();
++			spin_us(20);
++			continue;
+ 		}
+-		if (mach_absolute_time() > deadline) {
+-			say("max98512: %s (%#x): no answer %u ms after the software reset (REV_ID %#x): no more writing for this run\n",
+-			    a->name, a->addr, RESET_US / 1000, id);
+-			broken = true;
+-			return false;
++		i2c_start();
++		if (!i2c_tx_byte((SMA1303_ADDR << 1) | 1)) {
++			i2c_stop();
++			spin_us(20);
++			continue;
+ 		}
++		*val = i2c_rx_byte(false);
++		i2c_stop();
++		return true;
+ 	}
+-	if (get(a, GLOBAL_SHDN, &shdn) != 0 || get(a, AMP_EN, &en) != 0 || (shdn & 1) != 0 || (en & 1) != 0) {
+-		say("max98512: %s (%#x): after the software reset GLOBAL_SHDN %#x, AMP_EN %#x: not shut down; no more writing "
+-		    "for this run\n", a->name, a->addr, shdn, en);
+-		broken = true;
+-		return false;
+-	}
+-	return true;
++	return false;
+ }
+ 
+-/*
+- * Steps 1-3 of start(): both reset and set up, and the format; shut down and muted at the end. (Android's
+- * max98512_probe, then the stream's max98512_dai_set_fmt, _dai_hw_params and _set_clock: see the top of this file.)
+- */
+ static bool
+-configure(uint32_t slot_bits, uint32_t channels)
++sma_write(uint8_t reg, uint8_t val)
+ {
+-	uint8_t width = slot_bits == 16 ? 1 : slot_bits == 24 ? 2 : 3;
+-	uint8_t bclks = (uint8_t)(channels * slot_bits / 16);   /* 32, 48, 64 BCLKs a frame: 2, 3, 4 */
+-	uint8_t bypass = amps[0].b ? 0x00 : 0x02;
+-	bool any_b = amps[0].b || amps[1].b;
+-
+-	return both(GLOBAL_SHDN, 0) && reset(&amps[0]) && reset(&amps[1]) &&
+-	       both(MEAS_EN, 0) && both(PCM_TX_HIZ_CTRL_A, 0xff) && both(PCM_TX_HIZ_CTRL_B, 0xff) &&
+-	       each(MONOMIX_A, amps[0].monomix_a, amps[1].monomix_a) && each(MONOMIX_B, amps[0].monomix_b, amps[1].monomix_b) &&
+-	       each(AMP_VOL_CTRL, amps[0].vol, amps[1].vol) && both(SPK_GAIN, 0) &&
+-	       both(AMP_DSP_CFG, 0x01) && both(MEAS_DSP_CFG, 0xf7) &&
+-	       both(BOOST_CTRL0, 0x1c) && both(BOOST_CTRL1, 0x3e) && both(BOOST_CTRL3, 0x01) &&
+-	       both(MEAS_ADC_CFG, 0x07) && both(MEAS_ADC_BASE_MSB, 0x00) && both(MEAS_ADC_BASE_LSB, 0x0b) &&
+-	       both(ADC_CH0_DIVIDE, 0x02) && both(ADC_CH0_DIVIDE + 1, 0x02) && both(ADC_CH0_DIVIDE + 2, 0x02) &&
+-	       both(ADC_CH0_FILT_CFG, 0x0c) && both(ADC_CH0_FILT_CFG + 1, 0x0c) && both(ADC_CH0_FILT_CFG + 2, 0x0c) &&
+-	       both(SQUELCH, 0x10) && both(BROWNOUT_EN, 0x07) && both(BROWNOUT_LVL_HOLD, 0xff) &&
+-	       both(BROWNOUT_LVL1_THRESH, 0xa0) && both(BROWNOUT_LVL2_THRESH, 0x30) && both(BROWNOUT_LVL3_THRESH, 0x10) &&
+-	       both(BROWNOUT_HYSTERESIS, 0x0f) && both(BROWNOUT_LIMITER, 0x76) &&
+-	       each(0x70, amps[0].current_limit, amps[1].current_limit) && both(0x71, 0x06) && both(0x72, 0) && both(0x73, 0) &&
+-	       each(0x74, amps[0].current_limit, amps[1].current_limit) && both(0x75, 0x09) && both(0x76, 0) && both(0x77, 0) &&
+-	       each(0x78, amps[0].current_limit, amps[1].current_limit) && both(0x79, 0x0c) && both(0x7A, 0) && both(0x7B, 0) &&
+-	       both(0x7C, 0) && both(0x7D, 0) &&
+-	       both(ENV_HEADROOM, 0x0a) && both(ENV_CTRL, 0x01) &&
+-	       both(BOOST_BYPASS_1, 0x05) && both(BOOST_BYPASS_2, bypass) && both(BOOST_BYPASS_3, 0x01) &&
+-	       /* max98512_adc_config's start; the IV slots stay closed */
+-	       both(PCM_TX_HIZ_CTRL_A, 0xff) && both(PCM_TX_EN_A, 0) && both(PCM_TX_EN_B, 0) && both(CLK_MON, 0) &&
+-	       (!any_b || (both(INT_EN1, 0) && both(INT_EN2, 0) && both(IRQ_CTRL, 0) && both(PCM_MASTER_MODE, 0) &&
+-	       both(PCM_CLK_SETUP, 0x22) && both(SSM_CFG, 0x05) && both(BROWNOUT_GAIN_ATK_REL, 0) &&
+-	       both(ENV_VOUT_DELAY, 0) && both(ENV_REL_RATE, 0) && both(ENV_HOLD_RATE, 0))) &&
+-	       /* the format: max98512_dai_set_fmt (I2S, NB_NF, CBS_CFS), max98512_dai_hw_params, max98512_set_clock */
+-	       both_bits(PCM_MASTER_MODE, 0x03, 0x00) && both_bits(PCM_MODE_CFG, 0x04, 0x00) &&
+-	       put_bits(&amps[0], PCM_RX_EN_A, amps[0].rx_en, amps[0].rx_en) &&
+-	       put_bits(&amps[1], PCM_RX_EN_A, amps[1].rx_en, amps[1].rx_en) &&
+-	       both_bits(PCM_MODE_CFG, 0x38, 0x00) && both_bits(SPK_SRC_SEL, 0x03, 0x00) && both_bits(PDM_RX_CTRL, 0x01, 0x00) &&
+-	       both_bits(PCM_MODE_CFG, 0xc0, (uint8_t)(width << 6)) && both_bits(PCM_SR_SETUP1, 0x0f, SR_48000) &&
+-	       both_bits(PCM_SR_SETUP2, 0xf0, SR_48000 << 4) && both_bits(PCM_SR_SETUP2, 0x0f, SR_IV_24000) &&
+-	       both_bits(PCM_CLK_SETUP, 0x0f, bclks);
++	for (int attempt = 0; attempt < 3; attempt++) {
++		i2c_start();
++		if (i2c_tx_byte((SMA1303_ADDR << 1) | 0) &&
++		    i2c_tx_byte(reg) &&
++		    i2c_tx_byte(val)) {
++			i2c_stop();
++			return true;
++		}
++		i2c_stop();
++		spin_us(20);
++	}
++	return false;
+ }
+ 
+-#if __has_include(<vm/vm_kern_xnu.h>)   /* xnu-12377: no fuel gauge; battery temperature not known */
+-static int hakios_battery_temperature(void) { return -273; }
+-#endif
+-/* steps 4-6 of start(): the speaker path on, the level, the global enable (__max98512_spk_enable, the stereo mode) */
+ static bool
+-unmute(void)
++sma_update_bits(uint8_t reg, uint8_t mask, uint8_t val)
+ {
+-	int celsius = hakios_battery_temperature();
+-	bool cold = celsius != -273 && celsius <= 5;
+-	bool ok;
+-
+-	ok = put_bits(&amps[0], SPK_GAIN, 0x07, amps[0].gain) && put_bits(&amps[0], AMP_VOL_CTRL, 0x7f, amps[0].vol) &&
+-	    put_bits(&amps[1], SPK_GAIN, 0x07, amps[1].gain) && put_bits(&amps[1], AMP_VOL_CTRL, 0x7f, amps[1].vol) &&
+-	    both_bits(MEAS_EN, 0x03, 0) &&
+-	    both(BROWNOUT_LVL2_THRESH, cold ? 0x40 : 0x30) && both(BROWNOUT_LVL3_THRESH, cold ? 0x20 : 0x10) &&
+-	    both(BOOST_BYPASS_2, amps[0].b ? 0x00 : 0x02);
+-	for (unsigned i = 0; ok && i < 2; i++) {
+-		const struct amp *a = &amps[i];
+-
+-		ok = put(a, PCM_RX_EN_A, a->rx_en) && put(a, MONOMIX_A, a->monomix_a) && put(a, MONOMIX_B, a->monomix_b) &&
+-		    put_bits(a, AMP_EN, 0x01, 0x01) && put_bits(a, AMP_EN, 0xc0, 0x80) && put_bits(a, GLOBAL_SHDN, 0x01, 0x01);
++	uint8_t cur = 0;
++
++	if (!sma_read(reg, &cur)) {
++		return false;
+ 	}
+-	return ok;
++	return sma_write(reg, (uint8_t)((cur & ~mask) | (val & mask)));
+ }
+ 
+-/* shut down, in Android's order (max98512_spk_enable(0)), whatever happened before; then the ramp down, by the clock */
++/* Exact SMA1303 writable register defaults + A21s probe + 48 kHz 2x16-bit I2S slave PLL (1.536 -> 24.576 MHz) */
++struct reg_pair {
++	uint8_t reg, val;
++};
++
++static const struct reg_pair sma1303_init_regs[] = {
++	{ 0x00, 0x80 }, { 0x01, 0x00 }, { 0x02, 0x00 }, { 0x03, 0x11 },
++	{ 0x04, 0x17 }, { 0x09, 0x00 }, { 0x0A, 0x31 }, { 0x0B, 0x98 },
++	{ 0x0C, 0x84 }, { 0x0D, 0x07 }, { 0x0E, 0x3F }, { 0x10, 0x04 },
++	{ 0x11, 0x01 }, { 0x12, 0x00 }, { 0x14, 0x5C }, { 0x15, 0x01 },
++	{ 0x16, 0x0F }, { 0x17, 0x0F }, { 0x18, 0x0F }, { 0x19, 0x00 },
++	{ 0x1A, 0x00 }, { 0x1B, 0x00 }, { 0x23, 0x19 }, { 0x24, 0x00 },
++	{ 0x25, 0x00 }, { 0x26, 0x04 }, { 0x33, 0x00 }, { 0x34, 0x0C },
++	{ 0x36, 0x92 }, { 0x37, 0x27 }, { 0x38, 0x64 }, { 0x3B, 0x5A },
++	{ 0x3C, 0x20 }, { 0x3D, 0x00 }, { 0x3E, 0x03 }, { 0x3F, 0x0C },
++	{ 0x8B, 0x07 }, { 0x8C, 0xE0 }, { 0x8D, 0x8B }, { 0x8E, 0x6F },
++	{ 0x8F, 0x03 }, { 0x90, 0x26 }, { 0x91, 0x42 }, { 0x92, 0xE0 },
++	{ 0x94, 0x35 }, { 0x95, 0x0C }, { 0x96, 0x42 }, { 0x97, 0x95 },
++	{ 0xA0, 0x00 }, { 0xA1, 0x3B }, { 0xA2, 0x88 }, { 0xA3, 0x28 },
++	{ 0xA4, 0x40 }, { 0xA5, 0x01 }, { 0xA6, 0x41 }, { 0xA7, 0x00 },
++};
++
+ static void
+-mute(void)
++amp_status(const char *when)
+ {
+-	uint64_t deadline;
++	uint8_t r00 = 0, r0a = 0, r0e = 0, r10 = 0, r8e = 0, rfa = 0, rfb = 0, rff = 0;
+ 
+-	clear_both(GLOBAL_SHDN, 0x01);
+-	clear_both(AMP_EN, 0x01);
+-	clear_both(MEAS_EN, 0x03);
+-	for (deadline = deadline_us(RAMP_US); mach_absolute_time() < deadline;) {
++	if (!chip_ready) {
++		return;
+ 	}
++	(void)sma_read(0x00, &r00);
++	(void)sma_read(0x0A, &r0a);
++	(void)sma_read(0x0E, &r0e);
++	(void)sma_read(0x10, &r10);
++	(void)sma_read(0x8E, &r8e);
++	(void)sma_read(0xFA, &rfa);
++	(void)sma_read(0xFB, &rfb);
++	(void)sma_read(0xFF, &rff);
++	say("sma1303: %s: SYS=%#04x VOL=%#04x MUTE=%#04x SPK=%#04x PLL=%#04x STAT1=%#04x STAT2=%#04x ID=%#04x\n",
++	    when, r00, r0a, r0e, r10, r8e, rfa, rfb, rff);
+ }
+ 
+-/* ---- ABOX's hook ---- */
+-
+-/* after UAIF1's clocks run: both reset, set up and unmuted; 0, EINVAL (a format other than this phone's) or EIO */
+ static int
+ amp_start(uint32_t rate, uint32_t slot_bits, uint32_t channels)
+ {
+-	uint64_t t0 = mach_absolute_time(), us;
+-	bool again = configured_bits == slot_bits;
+-	int error = 0;
+-
+-	lck_mtx_lock(&amp_lock);
+-	if (broken) {
+-		error = EIO;
+-	} else if (rate != 48000 || channels != 2 || (slot_bits != 16 && slot_bits != 24 && slot_bits != 32)) {
+-		error = EINVAL;
+-	} else {
+-		if (playing) {
+-			mute();
+-			playing = false;
+-		}
+-		/*
+-		 * The reset and the whole set-up only when the amplifiers are not set up for this width already (the first
+-		 * start, or after max98512=2's set-up for another one): a start is then only unmute(), a few writes, so that
+-		 * the beginning of a short sound (a click; ABOX starts the amplifiers when iOS's first loud frames arrive)
+-		 * is not spent on I2C. stop() (mute) leaves the set-up as it is.
+-		 */
+-		if ((configured_bits == slot_bits || configure(slot_bits, channels)) && unmute()) {
+-			configured_bits = slot_bits;
+-			playing = true;
+-			starts++;
+-		} else {
+-			configured_bits = 0;
+-			mute();
+-			error = EIO;
+-		}
+-	}
+-	if (error != 0) {
+-		refusals++;
++	if (!chip_ready) {
++		return ENXIO;
++	}
++	if (rate != 48000 || slot_bits != 16 || channels != 2) {
++		say("sma1303: unsupported format %u Hz %u x %u\n", rate, channels, slot_bits);
++		return EINVAL;
++	}
++	/* sma1303_startup(): PLL on -> POWER_ON -> SPK mono enable -> UNMUTE */
++	if (!sma_update_bits(0x8E, 0x07, 0x00) ||
++	    !sma_update_bits(0x00, 0x01, 0x01) ||
++	    !sma_update_bits(0x10, 0x1C, 0x04) ||
++	    !sma_update_bits(0x0E, 0x01, 0x00)) {
++		say("sma1303: I2C write failed during start()\n");
++		return EIO;
++	}
++	amp_on = true;
++	start_count++;
++	say("sma1303: started (%u Hz, %u x %u-bit I2S, vol %#04x, start #%u)\n",
++	    rate, channels, slot_bits, init_vol, start_count);
++	amp_status("started");
++	return 0;
++}
++
++static void
++amp_stop_common(bool spinning)
++{
++	if (!chip_ready || !amp_on) {
++		return;
+ 	}
+-	lck_mtx_unlock(&amp_lock);
+-	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &us);
+-	us /= 1000;
+-	if (error == 0) {
+-		say("max98512: on: %u Hz, %u x %u bits, I2S; top +%d dB, bottom +%d dB, both at -3 dB digital (start %u, %s, %llu us)\n",
+-		    rate, channels, slot_bits, 3 * amps[0].gain, 3 * amps[1].gain, starts, again ? "unmuted only" : "set up first", us);
++	/* sma1303_shutdown(): MUTE -> 55 ms ramp -> SPK off -> POWER_OFF -> PLL off */
++	(void)sma_update_bits(0x0E, 0x01, 0x01);
++	if (spinning) {
++		spin_us(55000);
+ 	} else {
+-		say("max98512: start (%u Hz, %u x %u bits) refused: %s (%u so far)\n", rate, channels, slot_bits,
+-		    error == EINVAL ? "not 48000 Hz, 2 channels of 16, 24 or 32 bits" : broken ? "writing has ended for this run" :
+-		    "the amplifiers did not take it", refusals);
++		delay_for_interval(55, NSEC_PER_MSEC);
+ 	}
+-	return error;
++	(void)sma_update_bits(0x10, 0x1C, 0x00);
++	(void)sma_update_bits(0x00, 0x01, 0x00);
++	(void)sma_update_bits(0x8E, 0x07, 0x07);
++	amp_on = false;
+ }
+ 
+-/* before UAIF1's clocks stop: both shut down, and 16 ms for the ramp down */
+ static void
+ amp_stop(void)
+ {
+-	lck_mtx_lock(&amp_lock);
+-	mute();
+-	playing = false;
+-	lck_mtx_unlock(&amp_lock);
++	amp_stop_common(false);
++	amp_status("stopped");
+ }
+ 
+-/*
+- * On the way back to the loader (loader_return(), a panic's way out too): both shut down, if start() left them playing.
+- * One processor is left and no lock may be taken, so the bus is used directly: reset first (a transfer may have been cut
+- * off with the processor that made it), then GLOBAL_SHDN's enable bit cleared in each, then the ramp down with UAIF1's
+- * clocks still running (hakios_exynos_abox_quiesce() stops them next). Nothing else is written.
+- */
+ void
+ hakios_max98512_quiesce(void)
+ {
+-	uint64_t deadline;
+-
+-	if (!playing) {
+-		return;
+-	}
+-	hakios_hsi2c_reset(&bus);
+-	for (unsigned i = 0; i < 2; i++) {
+-		uint16_t at = address(&amps[i], GLOBAL_SHDN);
+-		uint8_t buf[3] = { (uint8_t)(at >> 8), (uint8_t)at, 0 };
+-		uint8_t now = 0;
+-		uint32_t error = hakios_hsi2c_message(&bus, amps[i].addr, false, buf, 2, false);
+-
+-		if (error == 0) {
+-			error = hakios_hsi2c_message(&bus, amps[i].addr, true, &now, 1, true);
+-		}
+-		if (error == 0) {
+-			buf[2] = now & ~0x01;
+-			error = hakios_hsi2c_message(&bus, amps[i].addr, false, buf, 3, true);
+-		}
+-		say("max98512: at the run's end: %s (%#x) GLOBAL_SHDN %#x -> %#x%s\n", amps[i].name, amps[i].addr, now,
+-		    now & ~0x01, error == 0 ? "" : ": the bus FAILED");
+-	}
+-	for (deadline = deadline_us(RAMP_US); mach_absolute_time() < deadline;) {
+-	}
+-	playing = false;
+-}
+-
+-/*
+- * What the amplifiers say of themselves (ABOX's reports while it plays, and the console's "abox"): the interrupts' raw
+- * and live state (INT_RAW1-3, INT_STATE1-3: the clock monitor, thermal and over-current flags), the enables, the level,
+- * the measurement ADC's three channels (MEAS_ADC_CH0-2_READ, with MEAS_ADC_CFG 0x07 all three converting), the
+- * brownout state and the boost's output as the envelope tracker reads it (ENV_TRACK_BOOST_VOUT_READ): with a tone
+- * playing the boost follows the signal, so a reading that moves away from the idle one is the amplifier's own word
+- * that it plays. Only read; no lock but the bus's (a start or stop may run at the same time: the numbers are then
+- * those of a moment of it).
+- */
+-static void
+-amp_status(const char *when)
+-{
+-	static const uint16_t regs[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, GLOBAL_SHDN, AMP_EN, SPK_GAIN, AMP_VOL_CTRL,
+-		                         0x4A, 0x4B, 0x4C, 0x4F, 0x85 };
+-	char line[sizeof(regs) / sizeof(regs[0]) * 3 + 1];
+-
+-	for (unsigned i = 0; i < 2; i++) {
+-		const struct amp *a = &amps[i];
+-		unsigned used = 0;
+-
+-		if (a->revision == 0) {
+-			continue;
+-		}
+-		for (unsigned r = 0; r < sizeof(regs) / sizeof(regs[0]); r++) {
+-			uint8_t v = 0;
+-
+-			snprintf(line + used, sizeof(line) - used, get(a, regs[r], &v) == 0 ? " %02x" : " ??", (unsigned)v);
+-			used += 3;
+-		}
+-		say("max98512: %s, %s: INT_RAW1-3 INT_STATE1-3, GLOBAL_SHDN AMP_EN SPK_GAIN AMP_VOL, ADC_CH0-2 BROWNOUT, BOOST_VOUT:%s\n",
+-		    a->name, when, line);
++	if (chip_ready && amp_on) {
++		amp_stop_common(true);
++		say("sma1303: quiesced on reboot/panic\n");
+ 	}
+ }
+ 
+-static const struct hakios_abox_amp amp_hook = {
+-	.name = "max98512", .start = amp_start, .stop = amp_stop, .status = amp_status,
++static const struct hakios_abox_amp sma1303_hook = {
++	.name = "sma1303",
++	.start = amp_start,
++	.stop = amp_stop,
++	.status = amp_status,
+ };
+ 
+-/* ---- the steps ---- */
+-
+-static void
+-amp_thread(void *arg, __unused wait_result_t result)
++void
++hakios_max98512_init(void)
+ {
+-	uint32_t steps = (uint32_t)(uintptr_t)arg;
+-	bool ok;
++	uint32_t steps = 0, vol_arg = 0;
++	uint8_t id = 0, rev = 0, st1 = 0, sys0 = 0;
+ 
+-	say("max98512: 1: map the bus (USI07 of PERIC1), its clocks on, USI07 and its pins to I2C; the two chips' revisions\n");
+-	if (!hakios_hsi2c_map(&bus, say)) {
+-		goto out;
+-	}
+-	say("max98512: 1: USI07's divider %u (7 bits)\n", (*(volatile uint32_t *)(bus.cmu + bus.div) & 0x7f) + 1);
+-	lck_mtx_lock(&bus_lock);
+-	hakios_hsi2c_power(&bus);
+-	hakios_hsi2c_reset(&bus);
+-	lck_mtx_unlock(&bus_lock);
+-	lck_mtx_lock(&amp_lock);
+-	ok = identify(&amps[0]);
+-	ok = identify(&amps[1]) && ok;          /* (both asked, whatever the first said) */
+-	for (unsigned i = 0; i < 2; i++) {
+-		if (amps[i].revision != 0) {
+-			dump(&amps[i], "as found");
++	if (!PE_parse_boot_argn("sma1303", &steps, sizeof(steps)) || steps == 0) {
++		if (!PE_parse_boot_argn("max98512", &steps, sizeof(steps)) || steps == 0) {
++			return;
+ 		}
+ 	}
+-	lck_mtx_unlock(&amp_lock);
+-	if (!ok) {
+-		say("max98512: 1: both amplifiers are needed: nothing is written\n");
+-		goto out;
++	if (PE_parse_boot_argn("sma1303_vol", &vol_arg, sizeof(vol_arg)) && vol_arg <= 0xFFU) {
++		init_vol = (uint8_t)vol_arg;
+ 	}
+-	if (steps < 2) {
+-		goto out;
++	if (gpp1_va == 0) {
++		vm_offset_t base = ml_io_map(GPIO_PERIC_PA, GPIO_PERIC_SIZE);
++		if (base == 0) {
++			say("sma1303: cannot map GPIO_PERIC at %#lx\n", GPIO_PERIC_PA);
++			return;
++		}
++		gpp1_va = base + GPP1_OFFSET;
+ 	}
+-	say("max98512: 2: both reset and set up as for 48 kHz, 2 x 16 bits, I2S; shut down and muted\n");
+-	lck_mtx_lock(&amp_lock);
+-	ok = configure(16, 2);
+-	configured_bits = ok ? 16 : 0;
+-	if (!ok) {
+-		mute();
++	i2c_bus_init();
++	if (!sma_read(0xFF, &id) || !sma_read(0xFB, &rev) || !sma_read(0xFA, &st1) || !sma_read(0x00, &sys0)) {
++		say("sma1303: no I2C ACK at %#x on GPP1[0:1] (CON=%#x DAT=%#x PUD=%#x)\n",
++		    SMA1303_ADDR, gpp1_rd(GPIO_CON), gpp1_rd(GPIO_DAT), gpp1_rd(GPIO_PUD));
++		return;
+ 	}
+-	for (unsigned i = 0; i < 2; i++) {
+-		dump(&amps[i], ok ? "set up, muted" : "after a failure, shut down");
++	say("sma1303: 1: found Silicon Mitus SMA1303 at %#x: ID=%#04x REV=%#04x STAT1=%#04x SYS=%#04x\n",
++	    SMA1303_ADDR, id, rev, st1, sys0);
++	if ((id & 0xF8U) != 0x10U) {
++		say("sma1303: unexpected chip ID %#04x (expected 0x10..0x17); aborting\n", id);
++		return;
+ 	}
+-	lck_mtx_unlock(&amp_lock);
+-	if (!ok || steps < 3) {
+-		goto out;
++	if (steps < 2) {
++		return;
+ 	}
+-	say("max98512: 3: handed to ABOX's UAIF1: its start turns them on (top +%d dB, bottom +%d dB, both at -3 dB), its "
+-	    "stop off\n", 3 * amps[0].gain, 3 * amps[1].gain);
+-	hakios_abox_set_amp(&amp_hook);
+-#ifndef HAKIOS_EXYNOS_ABOX
+-	say("max98512: 3: this kernel has no ABOX driver: nothing will turn the amplifiers on\n");
+-#endif
+-out:
+-	thread_terminate(current_thread());
+-}
+-
+-#if __has_include(<vm/vm_kern_xnu.h>)   /* xnu-12377: called from IOKitBSDInit.cpp */
+-void
+-hakios_max98512_init(void)
+-#else   /* xnu-8796: STARTUP */
+-__startup_func
+-static void
+-max98512_init(void)
+-#endif
+-{
+-	uint32_t steps = 0, gain;
+-	thread_t thread;
+ 
+-	if (!PE_parse_boot_argn("max98512", &steps, sizeof(steps)) || steps == 0) {
++	/* Step 2: software reset + full register table programming (muted, power off) */
++	if (!sma_write(0x00, 0x82)) {
++		say("sma1303: 2: software reset write failed\n");
+ 		return;
+ 	}
+-	if (pe_arm_get_soc_base_phys() != EXYNOS_SOC_BASE_PA) {
+-		return;                 /* not the Exynos 9810's */
+-	}
+-	if (PE_parse_boot_argn("max98512_gain", &gain, sizeof(gain)) && gain >= GAIN_RECEIVER && gain <= GAIN_SPEAKER) {
+-		amps[1].gain = (uint8_t)gain;
++	spin_us(2500);
++	for (unsigned i = 0; i < sizeof(sma1303_init_regs) / sizeof(sma1303_init_regs[0]); i++) {
++		uint8_t reg = sma1303_init_regs[i].reg;
++		uint8_t val = (reg == 0x0A) ? init_vol : sma1303_init_regs[i].val;
++		if (!sma_write(reg, val)) {
++			say("sma1303: 2: write(%#04x, %#04x) failed\n", reg, val);
++			return;
++		}
+ 	}
+-	if (kernel_thread_start(amp_thread, (void *)(uintptr_t)(steps > 3 ? 3 : steps), &thread) == KERN_SUCCESS) {
+-		thread_deallocate(thread);
++	chip_ready = true;
++	amp_status("2: initialized (muted, shut down)");
++	if (steps < 3) {
++		return;
+ 	}
++
++	/* Step 3: hand to ABOX's UAIF1 speaker path */
++	hakios_abox_set_amp(&sma1303_hook);
++	say("sma1303: 3: registered with ABOX UAIF1 (vol %#04x)\n", init_vol);
+ }
+-#if !__has_include(<vm/vm_kern_xnu.h>)   /* xnu-8796 only */
+-STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, max98512_init);
+-#endif
+diff --git a/drivers/usb/hakios.dwc3.c b/drivers/usb/hakios.dwc3.c
+index e635679..1d6fe96 100644
+--- a/drivers/usb/hakios.dwc3.c
++++ b/drivers/usb/hakios.dwc3.c
+@@ -2275,6 +2275,8 @@ usb_gadget_init(void)
+ 	}
+ 	if (strcmp(soc, "exynos9810") == 0) {
+ 		glue = hakios_usb_glue_exynos9810();
++	} else if (strcmp(soc, "exynos850") == 0) {
++		glue = hakios_usb_glue_exynos850();
+ 	}
+ 	if (glue == NULL) {
+ 		say("usb: usb_gadget=%u, but no glue for \"%s\" in this kernel; off\n", steps, soc);
+diff --git a/drivers/usb/hakios.exynos_usb.c b/drivers/usb/hakios.exynos_usb.c
+index 7a67f68..ae6b35c 100644
+--- a/drivers/usb/hakios.exynos_usb.c
++++ b/drivers/usb/hakios.exynos_usb.c
+@@ -389,3 +389,378 @@ hakios_usb_glue_exynos9810(void)
+ {
+ 	return &exynos9810_glue;
+ }
++
++/* ---- Samsung Exynos 850 (S5E3830, Galaxy A21s SM-A217F): DWC3 @ 0x13600000, USBCON v2.00 @ 0x135d0000 ---- */
++#define E850_DWC3_PA            0x13600000u
++#define E850_USBCON_PA          0x135d0000u
++#define E850_PMU_PA             0x11860000u
++#define E850_PMU_USB_PHY        0x0704u
++#define E850_PMU_HSI_CONF       0x1c80u
++#define E850_PMU_HSI_STAT       0x1c84u
++#define E850_DTZPC_HSI          0x13410204u
++#define E850_CMU_HSI_PA         0x13400000u
++#define E850_HSI_BUS_USER       0x0600u
++#define E850_HSI_USB_USER       0x0620u
++#define E850_HSI_QCH_REFCLK     0x3000u
++#define E850_HSI_QCH_RTC        0x3004u
++#define E850_HSI_QCH_20CTRL     0x3030u
++#define E850_HSI_QCH_LINK       0x3034u
++#define E850_HSP_PLL            0x0028u
++#define E850_PINCTRL_PERI_PA    0x139b0000u
++#define E850_GPP0_CON           0x0020u         /* gpp0-0 = i2c0 SDA, gpp0-1 = i2c0 SCL (s2mu106 @ 0x3d) */
++#define E850_GPP0_DAT           0x0024u
++#define E850_GPP0_PUD           0x0028u
++#define S2MPU12_LDO1_CTRL       0x2bu           /* vdd085_usb20 */
++#define S2MPU12_LDO2_CTRL       0x2cu           /* vdd18_usb20 */
++#define S2MPU12_LDO11_CTRL      0x35u           /* vdd30_usb20 */
++#define S2MU106_ADDR            0x3du
++
++static vm_offset_t e850_pmu, e850_hsi, e850_usbcon, e850_pinctrl;
++static bool e850_mapped;
++
++/* Open-drain I2C master on GPP0[0]=SDA, GPP0[1]=SCL (external board pull-ups; CON 0=in/high, 1=out/low). */
++static inline void
++e850_sda(bool high)
++{
++	uint32_t c = rd(e850_pinctrl, E850_GPP0_CON) & ~0xfu;
++	wr(e850_pinctrl, E850_GPP0_CON, c | (high ? 0u : 1u));
++}
++
++static inline void
++e850_scl(bool high)
++{
++	uint32_t c = rd(e850_pinctrl, E850_GPP0_CON) & ~0xf0u;
++	wr(e850_pinctrl, E850_GPP0_CON, c | (high ? 0u : 0x10u));
++	if (high) {
++		for (unsigned i = 0; i < 50 && !(rd(e850_pinctrl, E850_GPP0_DAT) & 2u); i++) {
++			delay(1);
++		}
++	}
++}
++
++static inline bool
++e850_sda_in(void)
++{
++	return (rd(e850_pinctrl, E850_GPP0_DAT) & 1u) != 0;
++}
++
++static void
++e850_i2c_start(void)
++{
++	e850_sda(true);
++	e850_scl(true);
++	delay(5);
++	e850_sda(false);
++	delay(5);
++	e850_scl(false);
++	delay(5);
++}
++
++static void
++e850_i2c_stop(void)
++{
++	e850_sda(false);
++	delay(5);
++	e850_scl(true);
++	delay(5);
++	e850_sda(true);
++	delay(5);
++}
++
++static bool
++e850_i2c_tx(uint8_t byte)
++{
++	for (int b = 7; b >= 0; b--) {
++		e850_sda(((byte >> b) & 1u) != 0);
++		delay(5);
++		e850_scl(true);
++		delay(5);
++		e850_scl(false);
++	}
++	e850_sda(true);
++	delay(5);
++	e850_scl(true);
++	delay(5);
++	bool ack = !e850_sda_in();
++	e850_scl(false);
++	delay(5);
++	return ack;
++}
++
++static uint8_t
++e850_i2c_rx(bool ack)
++{
++	uint8_t val = 0;
++	e850_sda(true);
++	for (int b = 7; b >= 0; b--) {
++		delay(5);
++		e850_scl(true);
++		delay(5);
++		if (e850_sda_in()) {
++			val |= (uint8_t)(1u << b);
++		}
++		e850_scl(false);
++	}
++	e850_sda(!ack);
++	delay(5);
++	e850_scl(true);
++	delay(5);
++	e850_scl(false);
++	e850_sda(true);
++	delay(5);
++	return val;
++}
++
++static bool
++e850_muic_read(uint8_t reg, uint8_t *out)
++{
++	e850_i2c_start();
++	if (!e850_i2c_tx((uint8_t)(S2MU106_ADDR << 1)) || !e850_i2c_tx(reg)) {
++		e850_i2c_stop();
++		return false;
++	}
++	e850_i2c_start();
++	if (!e850_i2c_tx((uint8_t)((S2MU106_ADDR << 1) | 1u))) {
++		e850_i2c_stop();
++		return false;
++	}
++	*out = e850_i2c_rx(false);
++	e850_i2c_stop();
++	return true;
++}
++
++static bool
++e850_muic_write(uint8_t reg, uint8_t val)
++{
++	e850_i2c_start();
++	bool ok = e850_i2c_tx((uint8_t)(S2MU106_ADDR << 1)) && e850_i2c_tx(reg) && e850_i2c_tx(val);
++	e850_i2c_stop();
++	return ok;
++}
++
++/*
++ * Android's s2mu106_muic_shutdown writes MANUAL_SW_CTRL (0x70) = 0x00 (open), MUIC_CTRL1 (0x6d) |= 0x04,
++ * and CHG_DET (0x7f) &= ~0x40 on reboot, leaving D+/D- disconnected from the AP. Route D+/D- to USB_AP
++ * (0x70 = (v & 3) | 0x24) in manual-switch mode (0x6d &= ~0x04) so the host sees our pull-up immediately.
++ */
++static void
++e850_muic_route_usb(usb_glue_say_t say)
++{
++	if (!e850_pinctrl) {
++		return;
++	}
++	uint32_t save_con = rd(e850_pinctrl, E850_GPP0_CON);
++	uint32_t save_dat = rd(e850_pinctrl, E850_GPP0_DAT);
++
++	wr(e850_pinctrl, E850_GPP0_DAT, save_dat & ~3u);
++	e850_sda(true);
++	e850_scl(true);
++	delay(10);
++	for (unsigned i = 0; i < 9 && !e850_sda_in(); i++) {
++		e850_scl(false);
++		delay(5);
++		e850_scl(true);
++		delay(5);
++	}
++	e850_i2c_stop();
++
++	uint8_t id = 0xff, r4f = 0, r6d = 0, r70 = 0, r7f = 0;
++	bool ok = e850_muic_read(0x00, &id) && e850_muic_read(0x4f, &r4f) &&
++	    e850_muic_read(0x6d, &r6d) && e850_muic_read(0x70, &r70) && e850_muic_read(0x7f, &r7f);
++	if (ok) {
++		if (r4f & 0x01u) {
++			(void)e850_muic_write(0x4f, (uint8_t)(r4f & ~0x01u));
++		}
++		(void)e850_muic_write(0x7f, (uint8_t)(r7f | 0x40u));
++		(void)e850_muic_write(0x70, (uint8_t)((r70 & 0x03u) | 0x24u));
++		(void)e850_muic_write(0x6d, (uint8_t)((r6d ? r6d : 0x12u) & ~0x04u));
++		uint8_t n6d = 0, n70 = 0, n7f = 0;
++		(void)e850_muic_read(0x6d, &n6d);
++		(void)e850_muic_read(0x70, &n70);
++		(void)e850_muic_read(0x7f, &n7f);
++		say("usb: exynos850: s2mu106 MUIC (i2c0 0x3d): id=%02x 4f=%02x 6d=%02x->%02x 70=%02x->%02x 7f=%02x->%02x\n",
++		    id, r4f, r6d, n6d, r70, n70, r7f, n7f);
++	} else {
++		say("usb: exynos850: s2mu106 MUIC (i2c0 0x3d): no ACK (GPP0 CON=%08x DAT=%08x)\n", save_con, save_dat);
++	}
++
++	wr(e850_pinctrl, E850_GPP0_DAT, save_dat);
++	wr(e850_pinctrl, E850_GPP0_CON, save_con);
++}
++
++static uint64_t
++e850_smc(uint64_t fid, uint64_t a1, uint64_t a2, uint64_t a3)
++{
++	register uint64_t x0 __asm__("x0") = fid;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = a3;
++	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
++	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	return x0;
++}
++
++static bool
++e850_map_and_power(usb_glue_say_t say)
++{
++	if (!e850_mapped) {
++		e850_pmu = ml_io_map(E850_PMU_PA, 0x3000);
++		e850_hsi = ml_io_map(E850_CMU_HSI_PA, 0x4000);
++		e850_usbcon = ml_io_map(E850_USBCON_PA, 0x1000);
++		e850_pinctrl = ml_io_map(E850_PINCTRL_PERI_PA, 0x1000);
++		if (!e850_pmu || !e850_hsi || !e850_usbcon) {
++			say("usb: exynos850: MMIO map failed\n");
++			return false;
++		}
++		e850_mapped = true;
++	}
++	if (!(rd(e850_pmu, E850_PMU_HSI_STAT) & 1u)) {
++		wr(e850_pmu, E850_PMU_HSI_CONF, rd(e850_pmu, E850_PMU_HSI_CONF) | 1u);
++		for (unsigned us = 0; us < 50000 && !(rd(e850_pmu, E850_PMU_HSI_STAT) & 1u); us += 10) {
++			delay(10);
++		}
++		if (!(rd(e850_pmu, E850_PMU_HSI_STAT) & 1u)) {
++			say("usb: exynos850: pd-hsi did not power on (stat=%08x)\n", rd(e850_pmu, E850_PMU_HSI_STAT));
++			return false;
++		}
++		uint64_t rc = e850_smc(0x82000410ULL, 1ULL, E850_DTZPC_HSI, 0ULL);
++		say("usb: exynos850: pd-hsi powered on, DTZPC SMC=%#llx\n", rc);
++	}
++	wr(e850_hsi, E850_HSI_BUS_USER, rd(e850_hsi, E850_HSI_BUS_USER) | USER_MUX_SEL);
++	wr(e850_hsi, E850_HSI_USB_USER, rd(e850_hsi, E850_HSI_USB_USER) | USER_MUX_SEL);
++	wr(e850_hsi, E850_HSI_QCH_REFCLK, rd(e850_hsi, E850_HSI_QCH_REFCLK) | 3u);
++	wr(e850_hsi, E850_HSI_QCH_RTC, rd(e850_hsi, E850_HSI_QCH_RTC) | 3u);
++	wr(e850_hsi, E850_HSI_QCH_20CTRL, rd(e850_hsi, E850_HSI_QCH_20CTRL) | 3u);
++	wr(e850_hsi, E850_HSI_QCH_LINK, rd(e850_hsi, E850_HSI_QCH_LINK) | 3u);
++	delay(20);
++	return true;
++}
++
++static bool
++e850_look(usb_glue_say_t say, __unused uint32_t flags)
++{
++	if (!e850_map_and_power(say)) {
++		return false;
++	}
++	uint32_t iso = rd(e850_pmu, E850_PMU_USB_PHY);
++	uint32_t test = rd(e850_usbcon, HSP_TEST);
++	say("usb: exynos850: PMU +0x704=%08x pd-hsi=%08x HSI user=%08x/%08x USBCON VER=%08x CLKRST=%08x UTMI=%08x HSP=%08x TUNE=%08x TEST=%08x (line %s)\n",
++	    iso, rd(e850_pmu, E850_PMU_HSI_STAT), rd(e850_hsi, E850_HSI_BUS_USER), rd(e850_hsi, E850_HSI_USB_USER),
++	    rd(e850_usbcon, CTRL_VER), rd(e850_usbcon, CLKRST), rd(e850_usbcon, UTMI), rd(e850_usbcon, HSP),
++	    rd(e850_usbcon, HSP_TUNE), test, linestates[HSP_TEST_LINESTATE(test)]);
++	return true;
++}
++
++static int
++e850_phy_on(usb_glue_say_t say, __unused uint32_t flags)
++{
++	if (!e850_map_and_power(say)) {
++		return ENXIO;
++	}
++
++	/* 1. Ensure S2MPU12 USB20 PHY LDO1 (0.85V), LDO2 (1.8V), LDO11 (3.0V) are enabled (mode 3 = 0xc0). */
++	{
++		extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
++		extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
++		static const struct { uint8_t num, reg; } ldos[3] = {
++			{ 1, S2MPU12_LDO1_CTRL }, { 2, S2MPU12_LDO2_CTRL }, { 11, S2MPU12_LDO11_CTRL }
++		};
++		for (unsigned i = 0; i < 3; i++) {
++			uint8_t b = 0, a = 0;
++			bool okr = starlte_pmic_read(1, ldos[i].reg, &b);
++			if (okr && (b & 0xc0u) != 0xc0u) {
++				(void)starlte_pmic_write(1, ldos[i].reg, (uint8_t)(b | 0xc0u));
++			}
++			(void)starlte_pmic_read(1, ldos[i].reg, &a);
++			say("usb: exynos850: S2MPU12 LDO%u (%#x): %s %02x -> %02x\n",
++			    ldos[i].num, ldos[i].reg, okr ? "ok" : "err", b, a);
++		}
++		delay(200);
++	}
++
++	/* 2. Route USB-C D+/D- through s2mu106 MUIC to AP USB. */
++	e850_muic_route_usb(say);
++
++	/* 3. Release PMU USB20 PHY isolation and run Samsung CAL v3.01 (DT phy_version = 0x301) sequence. */
++	wr(e850_pmu, E850_PMU_USB_PHY, rd(e850_pmu, E850_PMU_USB_PHY) | PMU_ISOL_BIT);
++	delay(50);
++
++	uint32_t lc = (rd(e850_usbcon, LINK_CTRL) & ~0x1f00u) | 0x1e00u;
++	delay(500);
++	wr(e850_usbcon, LINK_CTRL, lc);
++	delay(500);
++	wr(e850_usbcon, LINK_CTRL, rd(e850_usbcon, LINK_CTRL) | LC_FORCE_QACT);
++	delay(500);
++
++	uint32_t cr = rd(e850_usbcon, CLKRST);
++	wr(e850_usbcon, CLKRST, cr | CR_LINK_SW_RST);
++	delay(10);
++	wr(e850_usbcon, CLKRST, cr & ~CR_LINK_SW_RST);
++
++	/* Assert PHY20_SW_RST | PHY20_RST_SEL | PORT_RST (0x300c for DT phy_version = 0x301). */
++	wr(e850_usbcon, CLKRST, rd(e850_usbcon, CLKRST) | 0x300cu);
++	wr(e850_usbcon, UTMI, rd(e850_usbcon, UTMI) & ~0xfu);
++	wr(e850_usbcon, HSP, rd(e850_usbcon, HSP) | HSP_EN_UTMISUSPEND | HSP_COMMONONN);
++	wr(e850_usbcon, PWR, rd(e850_usbcon, PWR) & ~0xf8u);
++	wr(e850_usbcon, HSP_TEST, rd(e850_usbcon, HSP_TEST) & ~HSP_TEST_SIDDQ);
++	delay(150);
++
++	wr(e850_usbcon, LINK_CTRL, rd(e850_usbcon, LINK_CTRL) | LC_BUS_FILTER_BYPASS);
++	wr(e850_usbcon, UTMI, rd(e850_usbcon, UTMI) | UTMI_FORCE_BVALID | UTMI_FORCE_VBUSVALID);
++	wr(e850_usbcon, HSP, rd(e850_usbcon, HSP) | HSP_VBUSVLDEXTSEL | HSP_VBUSVLDEXT);
++	delay(20);
++
++	/* Deassert PHY20_SW_RST & PORT_RST while keeping PHY20_RST_SEL (0x1000). */
++	wr(e850_usbcon, CLKRST, (rd(e850_usbcon, CLKRST) & ~0x300au) | 0x1000u);
++	delay(100);
++
++	wr(e850_usbcon, E850_HSP_PLL, rd(e850_usbcon, E850_HSP_PLL) & ~0x113u);
++	wr(e850_usbcon, LINK_PORT, (rd(e850_usbcon, LINK_PORT) & ~0xcu) | LP_SEL_OCD_U3 | LP_SEL_OCD_U2);
++	wr(e850_usbcon, LINK_CTRL, (rd(e850_usbcon, LINK_CTRL) & ~(7u << 16)) | LC_PIPE3_FORCE_EN | LC_FORCE_RX_ELEC_IDLE);
++	wr(e850_usbcon, COMBO_PMA_CTRL, rd(e850_usbcon, COMBO_PMA_CTRL) | PMA_LOW_PWRN);
++
++	uint32_t test = rd(e850_usbcon, HSP_TEST);
++	say("usb: exynos850: PHY up: CLKRST=%08x LINK_CTRL=%08x PWR=%08x UTMI=%08x HSP=%08x TEST=%08x (SIDDQ %u, line %s)\n",
++	    rd(e850_usbcon, CLKRST), rd(e850_usbcon, LINK_CTRL), rd(e850_usbcon, PWR), rd(e850_usbcon, UTMI),
++	    rd(e850_usbcon, HSP), test, (test & HSP_TEST_SIDDQ) ? 1 : 0, linestates[HSP_TEST_LINESTATE(test)]);
++	return 0;
++}
++
++static void
++e850_phy_state(char *out, unsigned size)
++{
++	if (!e850_mapped) {
++		snprintf(out, size, "(not mapped)");
++		return;
++	}
++	uint32_t test = rd(e850_usbcon, HSP_TEST), utmi = rd(e850_usbcon, UTMI);
++	snprintf(out, size, "line %s, UTMI %08x, SIDDQ %u", linestates[HSP_TEST_LINESTATE(test)],
++	    utmi, (test & HSP_TEST_SIDDQ) ? 1 : 0);
++}
++
++static void
++e850_phy_off(void)
++{
++	if (!e850_mapped) {
++		return;
++	}
++	wr(e850_usbcon, PWR, rd(e850_usbcon, PWR) | 0xf8u);
++	wr(e850_usbcon, HSP_TEST, rd(e850_usbcon, HSP_TEST) | HSP_TEST_SIDDQ);
++	wr(e850_pmu, E850_PMU_USB_PHY, rd(e850_pmu, E850_PMU_USB_PHY) & ~PMU_ISOL_BIT);
++}
++
++static const struct hakios_usb_glue exynos850_glue = {
++	.name = "exynos850",
++	.dwc3_pa = E850_DWC3_PA,
++	.dwc3_size = DWC3_SIZE,
++	.look = e850_look,
++	.phy_on = e850_phy_on,
++	.phy_state = e850_phy_state,
++	.phy_off = e850_phy_off,
++};
++
++const struct hakios_usb_glue *
++hakios_usb_glue_exynos850(void)
++{
++	return &exynos850_glue;
++}
+diff --git a/drivers/usb/hakios.usb_glue.h b/drivers/usb/hakios.usb_glue.h
+index 76cfe8c..058fef0 100644
+--- a/drivers/usb/hakios.usb_glue.h
++++ b/drivers/usb/hakios.usb_glue.h
+@@ -31,5 +31,6 @@ struct hakios_usb_glue {
+ 
+ /* drivers/usb/hakios.exynos_usb.c; NULL from hakios.stubs.c when that driver is left out */
+ const struct hakios_usb_glue *hakios_usb_glue_exynos9810(void);
++const struct hakios_usb_glue *hakios_usb_glue_exynos850(void);
+ 
+ #endif /* _HAKIOS_USB_GLUE_H_ */
+diff --git a/drivers/wifi/brcmfmac/hakios.brcmfmac.c b/drivers/wifi/brcmfmac/hakios.brcmfmac.c
+index e6b3749..fc6f343 100644
+--- a/drivers/wifi/brcmfmac/hakios.brcmfmac.c
++++ b/drivers/wifi/brcmfmac/hakios.brcmfmac.c
+@@ -343,7 +343,9 @@ hakios_wifi_radio_address(uint8_t *address)
+ 	const char *from;
+ 	bool good;
+ 
+-	if (steps < 6) {
++	uint32_t scsc_steps = 0;
++	PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps));
++	if (steps < 6 && scsc_steps < 6) {
+ 		return false;
+ 	}
+ 	if (PE_parse_boot_arg_str("wifi_mac", text, sizeof(text)) && text[0] != 0) {
+@@ -352,6 +354,11 @@ hakios_wifi_radio_address(uint8_t *address)
+ 	} else if ((file = hakios_image_file("fw", "mac.info", &size, NULL)) != NULL) {
+ 		from = "fw/mac.info";
+ 		good = hakios_macaddr_parse((const char *)file, size > 64 ? 64 : (size_t)size, address) != 0;
++	} else if (scsc_steps >= 6) {
++		static const uint8_t def_mac[6] = { 0x02, 0x53, 0x38, 0x30, 0xa2, 0x17 };
++		memcpy(address, def_mac, 6);
++		from = "A21s default local MAC";
++		good = true;
+ 	} else {
+ 		if (said++ == 0) {
+ 			say("brcmfmac: 6: no address of the phone's (wifi_mac, fw/mac.info: the phone's /efs/wifi/.mac.info): the "
+@@ -433,12 +440,15 @@ __attribute__((weak)) bool
+ hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, unsigned *passphrase_length)
+ {
+ 	uint64_t size = 0;
+-	const uint8_t *file = steps >= 8 ? hakios_image_file("fw", "network", &size, NULL) : NULL, *end = file + size, *line = file;
++	uint32_t scsc_steps = 0;
++	PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps));
++	bool want_join = (steps >= 8 || scsc_steps >= 8);
++	const uint8_t *file = want_join ? hakios_image_file("fw", "network", &size, NULL) : NULL, *end = file + size, *line = file;
+ 	unsigned lengths[2] = { 0, 0 }, sizes[2] = { *name_length, *passphrase_length };
+ 	uint8_t *where[2] = { name, passphrase };
+ 
+ 	if (file == NULL) {
+-		return steps >= 8 && network_from_args(name, name_length, passphrase, passphrase_length);
++		return want_join && network_from_args(name, name_length, passphrase, passphrase_length);
+ 	}
+ 	for (unsigned n = 0; n < 2 && line < end; n++) {
+ 		const uint8_t *stop = line;
+@@ -515,12 +525,15 @@ lx_os_pci_bar(unsigned bar, unsigned long long *address, unsigned long long *siz
+  * lx_os_irq_line_enable(). An INTA asserted again meanwhile is latched again, and fires as soon as the SPI is unmasked.
+  */
+ #define INTX_INTID      (32u + HAKIOS_EXYNOS_PCIE_INTX_SPI)
++#define SCSC_MBOX_INTID (32u + 54u)
+ 
+ static struct {
+ 	void (*function)(void *);
+ 	void *argument;
+ 	volatile bool attached;
+ 	bool running;
++	bool is_scsc;
++	uint32_t intid;
+ 	uint32_t pending;
+ 	thread_t thread;
+ 	uint64_t latched_not_a;                 /* times the latch held something besides INTA */
+@@ -554,7 +567,7 @@ line_runs(__unused void *parameter, __unused wait_result_t result)
+ 		}
+ 		line.running = true;
+ 		lck_mtx_unlock(&line_lock);
+-		if (hakios_exynos_pcie_intx_ack() & ~1u) {
++		if (!line.is_scsc && (hakios_exynos_pcie_intx_ack() & ~1u)) {
+ 			line.latched_not_a++;
+ 		}
+ 		line.function(line.argument);
+@@ -569,8 +582,11 @@ int
+ lx_os_irq_line_attach(void (*function)(void *), void *argument)
+ {
+ 	kern_return_t kr;
++	uint32_t scsc_steps = 0;
++	bool scsc = PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps)) && scsc_steps != 0;
++	uint32_t intid = scsc ? SCSC_MBOX_INTID : INTX_INTID;
+ 
+-	if (!hakios_exynos_pcie_ready() || function == NULL) {
++	if ((!scsc && !hakios_exynos_pcie_ready()) || function == NULL) {
+ 		return ENXIO;
+ 	}
+ 	if (line.thread == THREAD_NULL) {
+@@ -578,25 +594,27 @@ lx_os_irq_line_attach(void (*function)(void *), void *argument)
+ 			line.thread = THREAD_NULL;
+ 			return ENOMEM;
+ 		}
+-		thread_set_thread_name(line.thread, "brcmfmac-intx");
++		thread_set_thread_name(line.thread, scsc ? "scsc-mbox-irq" : "brcmfmac-intx");
+ 	}
+-	say("brcmfmac: 5: THE GIC'S DISTRIBUTOR IS WRITTEN for the chip's interrupt: SPI %u (INTID %u) level-triggered, to "
+-	    "this processor; then the root complex's INTA to INTD enabled (ELBI +0x00C)\n", HAKIOS_EXYNOS_PCIE_INTX_SPI, INTX_INTID);
+ 	lck_mtx_lock(&line_lock);
+ 	line.function = function;
+ 	line.argument = argument;
++	line.is_scsc = scsc;
++	line.intid = intid;
+ 	line.attached = true;
+ 	lck_mtx_unlock(&line_lock);
+-	if ((kr = gic_v3_spi_attach(INTX_INTID, false, line_arrived, NULL)) != KERN_SUCCESS) {
++	if ((kr = gic_v3_spi_attach(intid, false, line_arrived, NULL)) != KERN_SUCCESS) {
+ 		lck_mtx_lock(&line_lock);
+ 		line.attached = false;
+ 		lck_mtx_unlock(&line_lock);
+-		say("brcmfmac: 5: the GIC refuses SPI %u (%d)\n", HAKIOS_EXYNOS_PCIE_INTX_SPI, kr);
++		say("wifi: the GIC refuses INTID %u (%d)\n", intid, kr);
+ 		return kr == KERN_NAME_EXISTS ? EBUSY : EINVAL;
+ 	}
+-	gic_v3_spi_mask(INTX_INTID);
+-	hakios_exynos_pcie_intx(true);
+-	hakios_exynos_pcie_say_dma("the interrupt attached");
++	gic_v3_spi_mask(intid);
++	if (!scsc) {
++		hakios_exynos_pcie_intx(true);
++		hakios_exynos_pcie_say_dma("the interrupt attached");
++	}
+ 	return 0;
+ }
+ 
+@@ -610,7 +628,7 @@ void
+ lx_os_irq_line_enable(void)
+ {
+ 	if (line.attached) {
+-		gic_v3_spi_unmask(INTX_INTID);
++		gic_v3_spi_unmask(line.intid);
+ 	}
+ }
+ 
+@@ -620,55 +638,50 @@ lx_os_irq_line_detach(void)
+ 	if (!line.attached) {
+ 		return;
+ 	}
+-	hakios_exynos_pcie_say_dma("the interrupt let go");
+-	hakios_exynos_pcie_intx(false);
+-	gic_v3_spi_detach(INTX_INTID);
++	if (!line.is_scsc) {
++		hakios_exynos_pcie_say_dma("the interrupt let go");
++		hakios_exynos_pcie_intx(false);
++	}
++	gic_v3_spi_detach(line.intid);
+ 	lck_mtx_lock(&line_lock);
+ 	line.attached = false;
+ 	while (line.running && current_thread() != line.thread) {
+ 		lck_mtx_sleep(&line_lock, LCK_SLEEP_DEFAULT, (event_t)&line.running, THREAD_UNINT);
+ 	}
+ 	lck_mtx_unlock(&line_lock);
+-	say("brcmfmac: the chip's interrupt let go: %llu arrived; the latch held more than INTA %llu times\n",
+-	    gic_v3_spi_count(INTX_INTID), line.latched_not_a);
++	say("wifi: the chip's interrupt let go: %llu arrived\n", gic_v3_spi_count(line.intid));
+ }
+ 
+ unsigned long long
+ lx_os_irq_line_count(void)
+ {
+-	return line.attached ? gic_v3_spi_count(INTX_INTID) : 0;
++	return line.attached ? gic_v3_spi_count(line.intid) : 0;
+ }
+ 
+-/*
+- * ---- the way back to the loader. hakios_wifi_stop(): where a run ends in order (loader_return_after, the host's "xl
+- * stop", too hot, the battery low), on a thread: the driver taken down in order (lx_stop(): the network left, the
+- * interface down, brcmfmac's removal, which resets the chip) if it got as far as its interface, then the radio held in
+- * reset and unpowered (hakios_exynos_pcie_quiesce(), the same that loader_return() calls). hakios_wifi_quiesce(): on
+- * every way back, after a panic too, with one processor left and interrupts off: no lock and no sleep, only SPI 253
+- * masked; loader_return() calls hakios_exynos_pcie_quiesce() after it for the rest. Weak: a kernel with the WCN6750's
+- * driver too has that driver's (it does not start this one).
+- */
+ __attribute__((weak)) void
+ hakios_wifi_stop(void)
+ {
+ 	static bool stopped;
++	uint32_t scsc_steps = 0;
+ 
+ 	if (stopped) {
+ 		return;
+ 	}
+ 	stopped = true;
+ 	if (started) {
+-		say("brcmfmac: the run ends in order: the driver taken down (lx_stop)\n");
++		say("wifi: the run ends in order: the driver taken down (lx_stop)\n");
+ 		hakios_lx_stop();
+ 	}
+-	hakios_exynos_pcie_quiesce();
++	if (!PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps)) || scsc_steps == 0) {
++		hakios_exynos_pcie_quiesce();
++	}
+ }
+ 
+ __attribute__((weak)) void
+ hakios_wifi_quiesce(void)
+ {
+ 	if (line.attached) {
+-		gic_v3_spi_mask(INTX_INTID);
++		gic_v3_spi_mask(line.intid);
+ 	}
+ }
+ 
+@@ -709,8 +722,48 @@ join_given(__unused void *parameter, __unused wait_result_t result)
+ 		delay_for_interval(100, NSEC_PER_MSEC);
+ 	}
+ 	hakios_sta_state(&state);
++	if (state.phase != HAKIOS_STA_JOINED) {
++		uint64_t sz2 = 0;
++		const uint8_t *f2 = hakios_image_file("fw", "network2", &sz2, NULL);
++		if (f2 != NULL && sz2 > 0) {
++			const uint8_t *end2 = f2 + sz2, *ln2 = f2;
++			unsigned l2[2] = { 0, 0 }, s2[2] = { sizeof(what.ssid), sizeof(what.passphrase) };
++			uint8_t *w2[2] = { what.ssid, what.passphrase };
++			bzero(&what, sizeof(what));
++			for (unsigned n = 0; n < 2 && ln2 < end2; n++) {
++				const uint8_t *st = ln2;
++				while (st < end2 && *st != '\n' && *st != '\r')
++					st++;
++				if (st - ln2 > s2[n])
++					break;
++				memcpy(w2[n], ln2, (size_t)(st - ln2));
++				l2[n] = (unsigned)(st - ln2);
++				ln2 = st;
++				while (ln2 < end2 && (*ln2 == '\r' || *ln2 == '\n'))
++					ln2++;
++			}
++			if (l2[0] >= 1 && l2[0] <= 32 && l2[1] >= 8 && l2[1] <= 63) {
++				what.ssid_length = (uint8_t)l2[0];
++				what.passphrase_length = (uint8_t)l2[1];
++				what.security = HAKIOS_STA_WPA2_PSK;
++				say("brcmfmac: 8: trying fallback fw/network2 (%u B SSID)\n", l2[0]);
++				error = hakios_sta_ask_join_standing(&what);
++				bzero(&what, sizeof(what));
++				for (waited = 0; error == 0 && hakios_sta_busy() && waited < 600; waited++) {
++					delay_for_interval(100, NSEC_PER_MSEC);
++				}
++				hakios_sta_state(&state);
++			}
++		}
++	}
+ 	say("brcmfmac: 8: %s (%d, %d)\n", state.phase == HAKIOS_STA_JOINED ? "THE NETWORK OF FW/NETWORK IS JOINED" :
+ 	    "THE NETWORK OF FW/NETWORK IS NOT JOINED", error, state.last_error);
++	{
++		extern void a21s_logdump_sync(const char *tag) __attribute__((weak));
++		if (a21s_logdump_sync) {
++			a21s_logdump_sync("WIFI_JOIN");
++		}
++	}
+ 	thread_terminate(current_thread());
+ }
+ #endif
+@@ -755,3 +808,36 @@ hakios_brcmfmac_start(void)
+ 	error = hakios_lx_start();
+ 	say("brcmfmac: the driver's start returns %d\n", error);
+ }
++
++void hakios_scsc_start(uint32_t scsc_steps);
++void
++hakios_scsc_start(uint32_t scsc_steps)
++{
++	int error;
++
++	if (scsc_steps == 0) {
++		return;
++	}
++	steps = scsc_steps;
++	say("scsc: scsc_wlan=%u: Samsung Exynos 850 SCSC WLBT (mx140 + slsi_wlan) starting\n", scsc_steps);
++	if ((error = hakios_lx_prepare()) != 0) {
++		say("scsc: hakios_lx_prepare failed: %d\n", error);
++		return;
++	}
++	started = true;
++	if (scsc_steps >= 7) {
++		hakios_lx_net_early();
++	}
++	if (scsc_steps >= 8) {
++#ifdef HAKIOS_WIFI_STA
++		thread_t thread;
++
++		if (kernel_thread_start(join_given, NULL, &thread) == KERN_SUCCESS) {
++			thread_set_thread_name(thread, "scsc-join");
++			thread_deallocate(thread);
++		}
++#endif
++	}
++	error = hakios_lx_start();
++	say("scsc: hakios_lx_start returns %d\n", error);
++}
+diff --git a/drivers/wifi/lx/hakios.lx.c b/drivers/wifi/lx/hakios.lx.c
+index 9608087..c3466b9 100644
+--- a/drivers/wifi/lx/hakios.lx.c
++++ b/drivers/wifi/lx/hakios.lx.c
+@@ -75,6 +75,12 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
+ 	size = round_page(size);
+ 	physical = 0;
+ 	PE_parse_boot_argn("wifi_dma_at", &physical, sizeof(physical));
++	if (physical == 0) {
++		uint32_t scsc_steps = 0;
++		if (PE_parse_boot_argn("scsc_wlan", &scsc_steps, sizeof(scsc_steps)) && scsc_steps != 0) {
++			physical = 0xe9400000ULL;
++		}
++	}
+ 	if (physical != 0) {
+ 		/*
+ 		 * wifi_dma_at=ADDRESS: a piece of DRAM the kernel does not have (a gap of the device tree's, e.g. 0xDC000000 on
+diff --git a/socs/exynos9810/include/hakios.exynos9810_soc.h b/socs/exynos9810/include/hakios.exynos9810_soc.h
+index 06496fd..5558d40 100644
+--- a/socs/exynos9810/include/hakios.exynos9810_soc.h
++++ b/socs/exynos9810/include/hakios.exynos9810_soc.h
+@@ -14,9 +14,9 @@
+ #define EXYNOS_APM_SRAM_PA                      0x02039000UL
+ #define EXYNOS_SOC_BASE_PA                      0x10000000UL
+ #define EXYNOS_CHIPID_PA                        0x10000000UL
+-#define EXYNOS_PRODUCT_ID                       0xE9810000u
+-#define EXYNOS_PMU_PA                           0x14060000UL
+-#define EXYNOS_APM_MBOX_PA                      0x14100000UL
++#define EXYNOS_PRODUCT_ID                       0xE3830000u
++#define EXYNOS_PMU_PA                           0x11860000UL
++#define EXYNOS_APM_MBOX_PA                      0x11900000UL
+ 
+ /* Clock controllers (CMU) */
+ #define EXYNOS_CMU_PERIS_PA                     0x10020000UL
+@@ -29,7 +29,7 @@
+ #define EXYNOS_CMU_ISPPRE_PA                    0x16200000UL
+ #define EXYNOS_CMU_G3D_PA                       0x17400000UL
+ #define EXYNOS_CMU_MFC_PA                       0x17800000UL
+-#define EXYNOS_CMU_AUD_PA                       0x17C00000UL
++#define EXYNOS_CMU_AUD_PA                       0x14A00000UL
+ #define EXYNOS_CMU_BUSC_PA                      0x1A200000UL
+ #define EXYNOS_CMU_TOP_PA                       0x1A240000UL
+ #define EXYNOS_CMU_TOP_PAGE2_PA                 0x1A242000UL
+@@ -40,7 +40,7 @@
+ #define EXYNOS_GPIO_FSYS1_PA                    0x11430000UL
+ #define EXYNOS_GPIO_CHUB_PA                     0x13A80000UL
+ #define EXYNOS_GPIO_ALIVE_PA                    0x14050000UL
+-#define EXYNOS_GPIO_AUD_PA                      0x17C60000UL
++#define EXYNOS_GPIO_AUD_PA                      0x14A60000UL
+ 
+ /* System registers */
+ #define EXYNOS_SYSREG_PERIC0_PA                 0x10410000UL
+@@ -97,12 +97,12 @@
+ #define EXYNOS_CSIS_DMA_PA                      0x162F0000UL
+ #define EXYNOS_CSIS_SYSMMU_PA                   0x16310000UL
+ 
+-/* Audio: ABOX */
+-#define EXYNOS_ABOX_SYSREG_PA                   0x17C10000UL
+-#define EXYNOS_ABOX_SFR_PA                      0x17C50000UL
+-#define EXYNOS_ABOX_GICD_PA                     0x17CF1000UL
+-#define EXYNOS_ABOX_SRAM_PA                     0x17D00000UL
+-#define EXYNOS_ABOX_SYSMMU_PA                   0x17E00000UL
++/* Audio: ABOX (Exynos 850 / S5E3830 ABOX v2.3.0) */
++#define EXYNOS_ABOX_SYSREG_PA                   0x14A10000UL
++#define EXYNOS_ABOX_SFR_PA                      0x14A50000UL
++#define EXYNOS_ABOX_GICD_PA                     0x14AF1000UL
++#define EXYNOS_ABOX_SRAM_PA                     0x14B00000UL
++#define EXYNOS_ABOX_SYSMMU_PA                   0x14850000UL
+ 
+ /* USI blocks: each one's I2C or SPI and its mode word; which device is on which is the driver's */
+ #define EXYNOS_PERIC0_USI01_MODE_PA             0x1041100CUL
+@@ -225,31 +225,31 @@
+ #define EXYNOS_IRIS_TOP_ISPPRE_DIV              0x1890
+ #define EXYNOS_IRIS_TOP_ISPPRE_GATE             0x209C
+ 
+-/* ABOX: power and clocks */
+-#define EXYNOS_ABOX_CMU_DIV_UAIF0               0x1824
+-#define EXYNOS_ABOX_CMU_MUX_UAIF0               0x1004
+-#define EXYNOS_ABOX_CMU_QCH_BCLK0               0x3028
++/* ABOX: power and clocks (Exynos 850 / S5E3830) */
++#define EXYNOS_ABOX_CMU_DIV_UAIF0               0x1828
++#define EXYNOS_ABOX_CMU_MUX_UAIF0               0x100C
++#define EXYNOS_ABOX_CMU_QCH_BCLK0               0x3014
+ #define EXYNOS_ABOX_GPIO_GPB0                   0x0000
+-#define EXYNOS_ABOX_ABOX_DTZPC_ARG              0x17C10204u
+-#define EXYNOS_ABOX_PMU_AUD_CONFIGURATION       0x4000
+-#define EXYNOS_ABOX_PMU_AUD_STATUS              0x4004
+-#define EXYNOS_ABOX_PMU_GPIO_MODE_ABOX          0x1424
+-#define EXYNOS_ABOX_PMU_PAD_RETENTION_ABOX      0x4170
+-#define EXYNOS_ABOX_PMU_ABOX_CPU_CONFIG         0x415C
+-#define EXYNOS_ABOX_PMU_ABOX_CPU_STATUS         0x4160
+-#define EXYNOS_ABOX_PMU_ABOX_CPU_OPTION         0x4164
+-#define EXYNOS_ABOX_PMU_ABOX_CPU_ENABLE         (1u << 28)
+-#define EXYNOS_ABOX_PMU_ABOX_CPU_STANDBY        0x3804
++#define EXYNOS_ABOX_ABOX_DTZPC_ARG              0x14810204u
++#define EXYNOS_ABOX_PMU_AUD_CONFIGURATION       0x2080
++#define EXYNOS_ABOX_PMU_AUD_STATUS              0x2084
++#define EXYNOS_ABOX_PMU_GPIO_MODE_ABOX          0x20A0
++#define EXYNOS_ABOX_PMU_PAD_RETENTION_ABOX      0x20A0
++#define EXYNOS_ABOX_PMU_ABOX_CPU_CONFIG         0x2D80
++#define EXYNOS_ABOX_PMU_ABOX_CPU_STATUS         0x2D84
++#define EXYNOS_ABOX_PMU_ABOX_CPU_OPTION         0x2DA0
++#define EXYNOS_ABOX_PMU_ABOX_CPU_ENABLE         (1u << 0)
++#define EXYNOS_ABOX_PMU_ABOX_CPU_STANDBY        0x2DA4
+ #define EXYNOS_ABOX_CMU_PLL_LOCKTIME            0x0000
+-#define EXYNOS_ABOX_CMU_PLL_CON0                0x0120
+-#define EXYNOS_ABOX_CMU_PLL_CON3                0x018C
+-#define EXYNOS_ABOX_CMU_DIV_AUDIF               0x1800
+-#define EXYNOS_ABOX_CMU_DIV_BUS                 0x1804
+-#define EXYNOS_ABOX_CMU_DIV_BUSP                0x1808
+-#define EXYNOS_ABOX_CMU_DIV_PLL                 0x1820
+-#define EXYNOS_ABOX_CMU_DIV_UAIF1               0x1828
++#define EXYNOS_ABOX_CMU_PLL_CON0                0x010C
++#define EXYNOS_ABOX_CMU_PLL_CON3                0x0114
++#define EXYNOS_ABOX_CMU_DIV_AUDIF               0x1804
++#define EXYNOS_ABOX_CMU_DIV_BUS                 0x1808
++#define EXYNOS_ABOX_CMU_DIV_BUSP                0x180C
++#define EXYNOS_ABOX_CMU_DIV_PLL                 0x1814
++#define EXYNOS_ABOX_CMU_DIV_UAIF1               0x182C
+ #define EXYNOS_ABOX_CMU_MUX_CPU                 0x1000
+-#define EXYNOS_ABOX_CMU_MUX_UAIF1               0x1008
++#define EXYNOS_ABOX_CMU_MUX_UAIF1               0x1010
+ #define EXYNOS_ABOX_CMU_DIV_BUSY                (1u << 16)
+ 
+ /* PCIe's PMU fields */
+diff --git a/tools/ios27/build-xnu-ios.sh b/tools/ios27/build-xnu-ios.sh
+index cbf06d4..8c687df 100755
+--- a/tools/ios27/build-xnu-ios.sh
++++ b/tools/ios27/build-xnu-ios.sh
+@@ -58,8 +58,11 @@ export XNU_FIREHOSE_IOS=$ROOT/tools/ios27/firehose-ios.py XNU_JOBS=$jobs
+ # the 16.5 profile, the object is made when it is missing (tools/mk-brcmfmac.sh: Linux's brcmfmac sources and FreeBSD's
+ # LinuxKPI, fetched at pinned sums) and the build stops when it cannot be. NOWIFI=1 builds a kernel without it on purpose.
+ LX=$ROOT/xnu-deps/build/brcmfmac/out/brcmfmac.o
++if [ "${SCSC_WIFI:-0}" = 1 ] || [ -f "$ROOT/xnu-deps/build/scsc/out/scsc_wlan.o" ]; then
++	LX=$ROOT/xnu-deps/build/scsc/out/scsc_wlan.o
++fi
+ if [ "${NOWIFI:-0}" = 1 ]; then
+-	echo "build-xnu-ios: NOWIFI=1: brcmfmac is NOT linked: this kernel has no Wi-Fi"
++	echo "build-xnu-ios: NOWIFI=1: Wi-Fi object is NOT linked: this kernel has no Wi-Fi"
+ 	LX=/nonexistent
+ elif [ ! -f "$LX" ] && [ "${MACHINE_CONFIG:-}" = STARLTE ]; then
+ 	echo "build-xnu-ios: no $LX: making it (tools/mk-brcmfmac.sh)"
+@@ -68,9 +71,10 @@ elif [ ! -f "$LX" ] && [ "${MACHINE_CONFIG:-}" = STARLTE ]; then
+ fi
+ lx_now=none
+ if [ -f "$LX" ]; then
+-	xcrun strip -S -o "$DXB/brcmfmac.o" "$LX" || dxb_die "cannot strip $LX"
+-	export XNU_EXTRA_MAKEARGS="${XNU_EXTRA_MAKEARGS:-} HAKIOS_OBJECTS=$DXB/brcmfmac.o"
+-	lx_now=$(shasum -a 256 "$DXB/brcmfmac.o" | cut -c1-16)
++	LX_BASE=$(basename "$LX")
++	xcrun strip -S -o "$DXB/$LX_BASE" "$LX" || dxb_die "cannot strip $LX"
++	export XNU_EXTRA_MAKEARGS="${XNU_EXTRA_MAKEARGS:-} HAKIOS_OBJECTS=$DXB/$LX_BASE"
++	lx_now=$(shasum -a 256 "$DXB/$LX_BASE" | cut -c1-16)
+ fi
+ if [ "$(cat "$DXB/.hakios-objects" 2>/dev/null)" != "$lx_now" ]; then
+ 	rm -f "$(dirname "$(dxb_kernel_ios)")"/mach.*.unstripped "$(dirname "$(dxb_kernel_ios)")"/mach.*.unstripped.noctf
+diff --git a/tools/ios27/ca-gpu/hakios/eagl.c b/tools/ios27/ca-gpu/hakios/eagl.c
+index d7fc9ef..80dc831 100644
+--- a/tools/ios27/ca-gpu/hakios/eagl.c
++++ b/tools/ios27/ca-gpu/hakios/eagl.c
+@@ -231,6 +231,7 @@ struct image {
+ 	GLuint mirror;                  /* a texture that is the surface's memory, which the GPU copies the frame into (blit_targets) */
+ 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
+ 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
++	uint32_t wide_fmt;              /* 'w30r' or 'b3a8' wide-gamut 10-bit IOSurface converted to/from BGRA8888 */
+ 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
+ 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
+ 	uint64_t sum;                   /* ... and what it added up to */
+@@ -254,6 +255,8 @@ struct eagl {
+ 	GLuint program;                 /* the one in use, as CoreAnimation has it */
+ 	GLuint plain, lookup;           /* programs of ours for when that is none (plain_draw_begin()) */
+ 	GLint plain_matrix, plain_textured, lookup_matrix;
++	GLuint glass;                   /* iOS 27 Liquid Glass fallback (gfg/gfs/gba..gsh) */
++	GLint glass_matrix, glass_uv_bias;
+ 	GLuint vibrant, masking;        /* two more: what a colour matrix does to what is behind, and to the layer */
+ 	int blended;                    /* blending is off for such a draw, to be put back after it */
+ 	bool no_vibrant;                /* the first of the two could not be made */
+@@ -599,7 +602,7 @@ surface_mirrored(struct eagl *e, struct image *image)
+ 	IOSurfaceRef surface = image->surface;
+ 	GLint bound = 0;
+ 
+-	if (!blit_targets || !share_surfaces || !image->target || image->alpha_first ||
++	if (!blit_targets || !share_surfaces || !image->target || image->alpha_first || image->wide_fmt != 0 ||
+ 	    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE || image->plane != 0 ||
+ 	    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface)) {
+ 		return false;
+@@ -627,7 +630,7 @@ surface_shared(struct eagl *e, struct image *image)
+ {
+ 	IOSurfaceRef surface = image->surface;
+ 
+-	if (!share_surfaces || image->invert || image->alpha_first || image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ||
++	if (!share_surfaces || image->invert || image->alpha_first || image->wide_fmt != 0 || image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ||
+ 	    image->plane != 0 || (size_t)image->width != IOSurfaceGetWidth(surface) ||
+ 	    (size_t)image->height != IOSurfaceGetHeight(surface) ||
+ 	    !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))) {
+@@ -651,12 +654,14 @@ static bool
+ surface_changed(struct eagl *e, struct image *image)
+ {
+ 	IOSurfaceRef surface = image->surface;
+-	size_t size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
++	bool biplanar_wide = image->wide_fmt == 'b3a8' && IOSurfaceGetPlaneCount(surface) >= 2;
++	size_t bpr = biplanar_wide ? IOSurfaceGetBytesPerRowOfPlane(surface, 0) : IOSurfaceGetBytesPerRow(surface);
++	size_t size = bpr * (size_t)(image->height - 1) +
+ 	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
+-	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
++	const uint8_t *base = biplanar_wide ? IOSurfaceGetBaseAddressOfPlane(surface, 0) : IOSurfaceGetBaseAddress(surface);
+ 	uint64_t sum = size, word;
+ 
+-	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
++	if (image->looked == e->frames + 1 || base == NULL || (!biplanar_wide && IOSurfaceGetPlaneCount(surface) > 0)) {
+ 		return false;
+ 	}
+ 	image->looked = e->frames + 1;
+@@ -701,6 +706,19 @@ surface_changed(struct eagl *e, struct image *image)
+ 	return true;
+ }
+ 
++static inline uint8_t
++wide10_to_u8(uint32_t c10)
++{
++	int v = ((int)c10 - 384) * 255 / 511;
++	return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
++}
++
++static inline uint32_t
++u8_to_wide10(uint8_t c8)
++{
++	return (uint32_t)(384 + ((int)c8 * 511 + 127) / 255);
++}
++
+ /* Fill a texture, which is bound, from its IOSurface, unless it is the surface. */
+ static void
+ surface_to_texture(struct eagl *e, struct image *image)
+@@ -720,6 +738,42 @@ surface_to_texture(struct eagl *e, struct image *image)
+ 		say("hakios-gl: an IOSurface cannot be locked\n");
+ 		return;
+ 	}
++	if (image->wide_fmt == 'w30r' || image->wide_fmt == 'b3a8') {
++		bool has_a8 = image->wide_fmt == 'b3a8' && IOSurfaceGetPlaneCount(surface) >= 2;
++		const uint8_t *rgb_base = has_a8 ? IOSurfaceGetBaseAddressOfPlane(surface, 0) : IOSurfaceGetBaseAddress(surface);
++		size_t rgb_row = has_a8 ? IOSurfaceGetBytesPerRowOfPlane(surface, 0) : IOSurfaceGetBytesPerRow(surface);
++		const uint8_t *a_base = has_a8 ? IOSurfaceGetBaseAddressOfPlane(surface, 1) : NULL;
++		size_t a_row = has_a8 ? IOSurfaceGetBytesPerRowOfPlane(surface, 1) : 0;
++		size_t dst_row = (size_t)image->width * 4;
++		uint8_t *conv = rgb_base != NULL ? malloc(dst_row * (size_t)image->height) : NULL;
++
++		if (conv != NULL) {
++			for (GLsizei y = 0; y < image->height; y++) {
++				GLsizei sy = image->invert ? image->height - 1 - y : y;
++				const uint32_t *src_rgb = (const uint32_t *)(rgb_base + rgb_row * (size_t)sy);
++				const uint8_t *src_a = a_base ? a_base + a_row * (size_t)sy : NULL;
++				uint8_t *dst = conv + dst_row * (size_t)y;
++				for (GLsizei x = 0; x < image->width; x++) {
++					uint32_t w = src_rgb[x];
++					dst[x * 4 + 0] = wide10_to_u8(w & 0x3ff);
++					dst[x * 4 + 1] = wide10_to_u8((w >> 10) & 0x3ff);
++					dst[x * 4 + 2] = wide10_to_u8((w >> 20) & 0x3ff);
++					dst[x * 4 + 3] = src_a ? src_a[x] : 255;
++				}
++			}
++			glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
++			glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
++			glPixelStorei(GL_UNPACK_ROW_LENGTH, image->width);
++			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++			glTexImage2D(image->to, 0, (GLint)internal_format(image->internal, image->format), image->width, image->height, 0,
++			    GL_BGRA, GL_UNSIGNED_BYTE, conv);
++			glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
++			glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
++			free(conv);
++		}
++		IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
++		return;
++	}
+ 	base = planar ? IOSurfaceGetBaseAddressOfPlane(surface, image->plane) : IOSurfaceGetBaseAddress(surface);
+ 	/* Starbite: are the pictures CoreAnimation copies into surfaces of no pixel format (icons) empty? */
+ 	if (image->wrapped && !planar && pixel == 4) {
+@@ -845,6 +899,43 @@ target_to_surface(struct eagl *e, struct image *image)
+ 	glBindFramebuffer(GL_FRAMEBUFFER, e->reader);
+ 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+ 	if (IOSurfaceLock(surface, 0, NULL) == 0) {
++		if (image->wide_fmt == 'w30r' || image->wide_fmt == 'b3a8') {
++			size_t src_row = (size_t)image->width * 4;
++			uint8_t *tmp = malloc(src_row * (size_t)image->height);
++			if (tmp != NULL) {
++				bool has_a8 = image->wide_fmt == 'b3a8' && IOSurfaceGetPlaneCount(surface) >= 2;
++				uint8_t *rgb_base = has_a8 ? IOSurfaceGetBaseAddressOfPlane(surface, 0) : IOSurfaceGetBaseAddress(surface);
++				size_t rgb_row = has_a8 ? IOSurfaceGetBytesPerRowOfPlane(surface, 0) : IOSurfaceGetBytesPerRow(surface);
++				uint8_t *a_base = has_a8 ? IOSurfaceGetBaseAddressOfPlane(surface, 1) : NULL;
++				size_t a_row = has_a8 ? IOSurfaceGetBytesPerRowOfPlane(surface, 1) : 0;
++
++				glPixelStorei(GL_PACK_ROW_LENGTH, image->width);
++				glPixelStorei(GL_PACK_ALIGNMENT, 1);
++				glReadPixels(0, 0, image->width, image->height, GL_BGRA, GL_UNSIGNED_BYTE, tmp);
++				glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++				if (rgb_base != NULL) {
++					for (GLsizei y = 0; y < image->height; y++) {
++						GLsizei dy = image->invert ? image->height - 1 - y : y;
++						const uint8_t *src = tmp + src_row * (size_t)y;
++						uint32_t *dst_rgb = (uint32_t *)(rgb_base + rgb_row * (size_t)dy);
++						uint8_t *dst_a = a_base ? a_base + a_row * (size_t)dy : NULL;
++						for (GLsizei x = 0; x < image->width; x++) {
++							uint32_t b10 = u8_to_wide10(src[x * 4 + 0]);
++							uint32_t g10 = u8_to_wide10(src[x * 4 + 1]);
++							uint32_t r10 = u8_to_wide10(src[x * 4 + 2]);
++							dst_rgb[x] = (r10 << 20) | (g10 << 10) | b10;
++							if (dst_a) {
++								dst_a[x] = src[x * 4 + 3];
++							}
++						}
++					}
++				}
++				free(tmp);
++			}
++			IOSurfaceUnlock(surface, 0, NULL);
++			glBindFramebuffer(GL_FRAMEBUFFER, e->framebuffer);
++			return;
++		}
+ 		base = IOSurfaceGetBaseAddress(surface);
+ 		glPixelStorei(GL_PACK_ROW_LENGTH, (GLint)(row / 4));
+ 		glPixelStorei(GL_PACK_ALIGNMENT, 4);
+@@ -3854,6 +3945,29 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
+ 		snprintf(declared, strlen(text) + 64, "uniform lowp vec3 color_matrix[4];\n%s", text);
+ 		parts[3] = declared;
+ 	}
++	/*
++	 * iOS 27 dfg shader samples t0 = texture2D(texture0, texcoord0_0) and then assigns
++	 * gl_FragData[0] = s0 without declaring s0. Alias s0 = t0 cleanly.
++	 */
++	char *patched = NULL;
++	if (fragment) {
++		const char *src_now = parts[3];
++		bool need_s0_t0 = strstr(src_now, "s0") != NULL && strstr(src_now, "vec4 s0") == NULL &&
++		    strstr(src_now, "vec4 t0") != NULL;
++		if (need_s0_t0) {
++			const char *frag_pos = strstr(src_now, "gl_FragData[0]");
++			if (frag_pos != NULL) {
++				const char *ins = "lowp vec4 s0 = t0;\n  ";
++				size_t pre = (size_t)(frag_pos - src_now);
++				size_t need = strlen(src_now) + strlen(ins) + 8;
++				if ((patched = malloc(need)) != NULL) {
++					memcpy(patched, src_now, pre);
++					snprintf(patched + pre, need - pre, "%s%s", ins, frag_pos);
++					parts[3] = patched;
++				}
++			}
++		}
++	}
+ 	if (fragment) {
+ 		fetch = strstr(text, "gl_LastFragData") != NULL;
+ 		parts[2] = fetch ? fragment_fetch : fragment_plain;
+@@ -3862,6 +3976,7 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
+ 	free((void *)e->sources[shader % 256]);
+ 	e->sources[shader % 256] = text;
+ 	glShaderSource(shader, 6, (const GLchar *const[6]){ parts[0], parts[5], parts[1], parts[2], parts[3], parts[4] }, NULL);
++	free(patched);
+ 	free(declared);
+ 	EAGL_LEAVE(e, 0x12a0);
+ }
+@@ -4090,8 +4205,12 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
+ 	clear_now(e);
+ 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+ 	pixels = IOSurfaceGetPixelFormat(surface);
+-	if (target != GL_TEXTURE_2D || texture == 0 || (pixels != 'BGRA' && pixels != 0) ||
+-	    IOSurfaceGetBytesPerElement(surface) != 4 || IOSurfaceGetPlaneCount(surface) != 0 ||
++	bool ok_bgra = (pixels == 'BGRA' || pixels == 0) && IOSurfaceGetBytesPerElement(surface) == 4 &&
++	    IOSurfaceGetPlaneCount(surface) == 0;
++	bool ok_w30r = pixels == 'w30r' && IOSurfaceGetBytesPerElement(surface) == 4 &&
++	    IOSurfaceGetPlaneCount(surface) == 0;
++	bool ok_b3a8 = pixels == 'b3a8' && IOSurfaceGetPlaneCount(surface) == 2;
++	if (target != GL_TEXTURE_2D || texture == 0 || (!ok_bgra && !ok_w30r && !ok_b3a8) ||
+ 	    (image = image_new(e, (GLuint)texture, surface)) == NULL) {
+ 		say("hakios-gl: -attachImage: target %#lx, texture %d, an IOSurface of '%.4s': not done\n", target, texture,
+ 		    (const char *)&(uint32_t){ __builtin_bswap32(pixels) });
+@@ -4100,6 +4219,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
+ 	image->target = true;
+ 	image->to = GL_TEXTURE_2D;
+ 	image->invert = inverted;
++	image->wide_fmt = (ok_w30r || ok_b3a8) ? pixels : 0;
+ 	image->width = (GLsizei)IOSurfaceGetWidth(surface);
+ 	image->height = (GLsizei)IOSurfaceGetHeight(surface);
+ 	image->internal = image->format = GL_BGRA;
+diff --git a/tools/ios27/fullroot/pipeline/cache/aot/grow-check.py b/tools/ios27/fullroot/pipeline/cache/aot/grow-check.py
+index a6d8dbf..1f407ec 100755
+--- a/tools/ios27/fullroot/pipeline/cache/aot/grow-check.py
++++ b/tools/ios27/fullroot/pipeline/cache/aot/grow-check.py
+@@ -229,7 +229,7 @@ arr = np.array(sorted(ws), dtype='<u4'); d = os.path.join(HERE, 'stubdec'); os.m
+ arr.tofile(d + '/s.bin'); open(d + '/s.s', 'w').write('.text\n.incbin "s.bin"\n')
+ subprocess.check_call(['clang', '-arch', 'arm64', '-c', 's.s', '-o', 's.o'], cwd=d)
+ od = subprocess.check_output(['xcrun', '--find', 'llvm-objdump']).decode().strip()
+-out = subprocess.check_output([od, '-d', '--mcpu=cortex-a53', 's.o'], cwd=d).decode()
++out = subprocess.check_output([od, '-d', '--mcpu=cortex-a55', 's.o'], cwd=d).decode()
+ unkn = [l for l in out.splitlines() if '<unknown>' in l]
+ print('stub distinct words', len(arr), 'a53-undecodable', len(unkn), '(expected: only the native-LSE words of the dual A55 path)')
+ ubad = []
+diff --git a/tools/ios27/fullroot/pipeline/cache/aot/make-oracle.sh b/tools/ios27/fullroot/pipeline/cache/aot/make-oracle.sh
+index cb538f0..91e26db 100755
+--- a/tools/ios27/fullroot/pipeline/cache/aot/make-oracle.sh
++++ b/tools/ios27/fullroot/pipeline/cache/aot/make-oracle.sh
+@@ -19,27 +19,174 @@ OD=$(xcrun --find llvm-objdump); CC=$(xcrun --find clang)
+ [ -f "$SRC" ] || { echo "no cache at $SRC" >&2; exit 1; }
+ [ -f "$LSE" ] || { echo "no lse-rewrite.py at $LSE (LSE_REWRITE=<path>)" >&2; exit 1; }
+ mkdir -p "$D"; T=$(mktemp -d "${TMPDIR:-/tmp}/oracle.XXXXXX"); trap 'rm -rf "$T"' EXIT
+-# 1. the distinct words of every image's pure-instruction sections, in four files
++# 1. the distinct words of every image's pure-instruction sections, in four files (sequential per-subcache I/O, low RSS)
+ "$PY" - "$LSE" "$SRC" "$T" <<'PY'
+-import importlib.util, sys
++import glob, importlib.util, struct, sys
+ import numpy as np
+ spec = importlib.util.spec_from_file_location('lse', sys.argv[1]); lse = importlib.util.module_from_spec(spec); spec.loader.exec_module(lse)
+-c = lse.Cache(sys.argv[2], True)
+-parts = []
+-for path, base, lc, ncmds in c.images():
+-    for addr, size, foff in lse.text_sections(lc, ncmds):
+-        v = c.view(addr, size // 4 * 4)
+-        if v is not None:
+-            parts.append(np.unique(np.frombuffer(bytes(v), dtype='<u4')))
+-u = np.unique(np.concatenate(parts)).astype('<u4'); n = len(u)
+-for i in range(4):
+-    u[i * n // 4:(i + 1) * n // 4].tofile('%s/c%d.bin' % (sys.argv[3], i))
+-print('distinct __text words: %d' % n)
++main = sys.argv[2]
++maps = []
++for p in sorted(glob.glob(main + '*')):
++    if p.endswith(('.map', '.atlas', '.a2s', '.symbols')):
++        continue
++    with open(p, 'rb') as f:
++        h = f.read(0x200)
++        if not h.startswith(b'dyld_v1'):
++            continue
++        mo, mc = struct.unpack_from('<II', h, 0x10)
++        f.seek(mo)
++        for _ in range(mc):
++            a, s, o, maxp, initp = struct.unpack('<QQQII', f.read(32))
++            maps.append((a, s, p, o))
++maps.sort()
++starts = [m[0] for m in maps]
++import bisect
++def loc(addr):
++    i = bisect.bisect_right(starts, addr) - 1
++    if i >= 0:
++        a, s, p, o = maps[i]
++        if a <= addr < a + s:
++            return p, o + addr - a
++    return None, None
++
++with open(main, 'rb') as f:
++    h = f.read(0x200)
++    io, ic = struct.unpack_from('<II', h, 0x1c0)
++    if not ic:
++        io, ic = struct.unpack_from('<II', h, 0x18)
++    f.seek(io)
++    imgs = [struct.unpack('<QQQII', f.read(32)) for _ in range(ic)]
++
++by_file_mh = {}
++for im in imgs:
++    p, o = loc(im[0])
++    if p is not None:
++        by_file_mh.setdefault(p, []).append((o, im[0]))
++
++by_file_sects = {}
++for p, items in sorted(by_file_mh.items()):
++    items.sort()
++    with open(p, 'rb') as f:
++        for o, vma in items:
++            f.seek(o)
++            mh = f.read(32)
++            if len(mh) < 32 or struct.unpack_from('<I', mh, 0)[0] != 0xfeedfacf:
++                continue
++            ncmds, sz = struct.unpack_from('<II', mh, 16)
++            lc = f.read(sz)
++            for addr, size, _ in lse.text_sections(lc, ncmds):
++                nbytes = (size // 4) * 4
++                if nbytes:
++                    sp, so = loc(addr)
++                    if sp is not None:
++                        by_file_sects.setdefault(sp, []).append((so, nbytes))
++
++with open('%s/spans.txt' % sys.argv[3], 'w') as out:
++    for p, spans in sorted(by_file_sects.items()):
++        spans.sort()
++        for so, nbytes in spans:
++            out.write(f'{p}\t{so}\t{nbytes}\n')
+ PY
++cat > "$T/uniq_words.c" <<'EOF'
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++int main(int argc, char **argv) {
++    if (argc != 3) return 1;
++    uint32_t *bits = calloc(1ULL << 27, sizeof(uint32_t)); /* 512 MiB bitset for all 2^32 uint32 values */
++    if (!bits) return 2;
++    FILE *sf = fopen(argv[1], "r");
++    if (!sf) return 3;
++    char line[2048], cur_path[1536] = "";
++    FILE *cf = NULL;
++    size_t buf_cap = 4 << 20;
++    uint32_t *buf = malloc(buf_cap);
++    while (fgets(line, sizeof(line), sf)) {
++        char *t1 = strchr(line, '\t');
++        if (!t1) continue;
++        *t1 = 0;
++        char *t2 = strchr(t1 + 1, '\t');
++        if (!t2) continue;
++        *t2 = 0;
++        unsigned long long off = strtoull(t1 + 1, NULL, 10);
++        unsigned long long nbytes = strtoull(t2 + 1, NULL, 10);
++        if (strcmp(cur_path, line) != 0) {
++            if (cf) fclose(cf);
++            snprintf(cur_path, sizeof(cur_path), "%s", line);
++            cf = fopen(cur_path, "rb");
++            if (!cf) return 4;
++        }
++        fseeko(cf, (off_t)off, SEEK_SET);
++        while (nbytes > 0) {
++            size_t take = nbytes > buf_cap ? buf_cap : (size_t)nbytes;
++            if (fread(buf, 1, take, cf) != take) return 5;
++            size_t nwords = take / 4;
++            for (size_t i = 0; i < nwords; i++) {
++                uint32_t w = buf[i];
++                bits[w >> 5] |= (1u << (w & 31));
++            }
++            nbytes -= take;
++        }
++    }
++    if (cf) fclose(cf);
++    fclose(sf);
++    free(buf);
++
++    uint64_t total = 0;
++    for (size_t i = 0; i < (1ULL << 27); i++) {
++        if (bits[i]) total += (uint64_t)__builtin_popcount(bits[i]);
++    }
++    printf("distinct __text words: %llu\n", (unsigned long long)total);
++
++    uint64_t idx = 0;
++    int cur_part = -1;
++    FILE *of = NULL;
++    uint32_t outbuf[16384];
++    size_t outn = 0;
++    for (size_t i = 0; i < (1ULL << 27); i++) {
++        uint32_t m = bits[i];
++        while (m) {
++            unsigned b = (unsigned)__builtin_ctz(m);
++            uint32_t w = ((uint32_t)i << 5) | b;
++            m &= m - 1;
++            int want_part = (int)((idx * 4) / total);
++            if (want_part > 3) want_part = 3;
++            if (want_part != cur_part) {
++                if (of) {
++                    if (outn) fwrite(outbuf, 4, outn, of);
++                    outn = 0;
++                    fclose(of);
++                }
++                cur_part = want_part;
++                char opath[1024];
++                snprintf(opath, sizeof(opath), "%s/c%d.bin", argv[2], cur_part);
++                of = fopen(opath, "wb");
++                if (!of) return 6;
++            }
++            outbuf[outn++] = w;
++            if (outn == 16384) {
++                fwrite(outbuf, 4, outn, of);
++                outn = 0;
++            }
++            idx++;
++        }
++    }
++    if (of) {
++        if (outn) fwrite(outbuf, 4, outn, of);
++        fclose(of);
++    }
++    free(bits);
++    return 0;
++}
++EOF
++xcrun --sdk macosx clang -O3 "$T/uniq_words.c" -o "$T/uniq_words"
++"$T/uniq_words" "$T/spans.txt" "$T"
+ # 2. the ones an ARMv8.0 core's decoder does not know
+ for i in 0 1 2 3; do
+ 	( cd "$T" && printf '.text\n.incbin "c%d.bin"\n' $i > c$i.s && "$CC" -arch arm64 -c c$i.s -o c$i.o &&
+-	  "$OD" -d --mcpu=cortex-a53 c$i.o | awk '/<unknown>/ {print $2}' > a53unk$i.txt ) &
++	  "$OD" -d --mcpu=cortex-a55 c$i.o | awk '/<unknown>/ {print $2}' > a53unk$i.txt ) &
+ done
+ wait
+ cat "$T"/a53unk?.txt | sort -u > "$D/a53unk.txt"
+diff --git a/tools/ios27/mesa-ios/mk-mesa-ios.sh b/tools/ios27/mesa-ios/mk-mesa-ios.sh
+index 068c17d..fc665c0 100755
+--- a/tools/ios27/mesa-ios/mk-mesa-ios.sh
++++ b/tools/ios27/mesa-ios/mk-mesa-ios.sh
+@@ -18,7 +18,7 @@ mkdir -p "$B"
+ cd "$B"
+ # the Mesa 25.0.7 patches (mesa26-*.patch are for mk-panvk26-ios.sh); panfrost-opt-*: the optimisation run (docs/ios27/OPTIMISE.md)
+ PATCHES=("$HERE"/panfrost-*.patch "$HERE"/panvk-*.patch)
+-stamp=$(cat "${PATCHES[@]}" "$HERE"/starbite-drm/* | shasum -a 256 | cut -c1-16)
++stamp=$(cat "${PATCHES[@]}" "$HERE"/starbite-drm/*.c "$HERE"/starbite-drm/*.h | shasum -a 256 | cut -c1-16)
+ if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.starbite-patches 2>/dev/null)" != "$stamp" ]; then
+ 	[ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
+ 	echo "$SHA256  mesa-$VERSION.tar.xz" | shasum -a 256 -c --quiet
+diff --git a/tools/ios27/metal/patches/frontend-dexr.diff b/tools/ios27/metal/patches/frontend-dexr.diff
+index 2dabff4..90b9b2f 100644
+--- a/tools/ios27/metal/patches/frontend-dexr.diff
++++ b/tools/ios27/metal/patches/frontend-dexr.diff
+@@ -13,16 +13,16 @@
+   return buffer;
+  }
+ -static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out) {
+-+// iOS 27: SWEET_MTL2_DEXR=1 (mtl2-env) holds the extended-range formats (BGRA10_XR 552/553, BGR10_XR 554/555) of
+-+// textures that live in device memory only (not over an IOSurface or a buffer) as RGBA16Float, and render pipelines'
+++// iOS 27: SWEET_MTL2_DEXR=1 (RGBA16Float) or 2 (BGRA8Unorm/sRGB) holds extended-range formats (552-555) of
+++// textures that live in device memory only (not over an IOSurface or a buffer), and render pipelines'
+ +// color attachments to match: metal2vulkan samples XR textures only through mip-less, single-filter samplers, and iOS 27
+ +// CoreAnimation's backdrop blur (variable_blur_clamp_downsample_frag_lph) samples one otherwise (boot C: every such
+ +// command buffer refused, NotImplemented(Format)). Off by default.
+ +static int gDexr=-1;
+ +static MTLPixelFormat dexr(MTLPixelFormat f) {
+-+ if(gDexr<0){const char *e=getenv("SWEET_MTL2_DEXR");gDexr=(e && !strcmp(e,"1"))?1:0;}
+-+ if(!gDexr)return f;
+-+ switch((unsigned long)f){case 552:case 553:case 554:case 555:return MTLPixelFormatRGBA16Float;default:return f;}
+++ if(gDexr<0){const char *e=getenv("SWEET_MTL2_DEXR");gDexr=(e && !strcmp(e,"2"))?2:((e && !strcmp(e,"1"))?1:0);}
+++ if(gDexr==2){switch((unsigned long)f){case 552:case 554:return MTLPixelFormatBGRA8Unorm;case 553:case 555:return MTLPixelFormatBGRA8Unorm_sRGB;default:return f;}}
+++ if(!gDexr)return f;switch((unsigned long)f){case 552:case 553:case 554:case 555:return MTLPixelFormatRGBA16Float;default:return f;}
+ +}
+ +// iOS 27: the first 48 distinct (format, usage, storage) texture shapes a process makes, once each, for diagnosis.
+ +static void noteTextureShape(MTLTextureDescriptor *d,const char *how,MTLPixelFormat held) {
+@@ -30,7 +30,7 @@
+ + uint64_t key=((uint64_t)d.pixelFormat<<32)|((uint64_t)d.usage<<8)|((uint64_t)d.storageMode<<4)|(how[0]&15);
+ + {std::lock_guard<std::mutex> g(lock);if(seen.size()>=48 || !seen.insert(key).second)return;}
+ + char line[200];snprintf(line,sizeof line,"native-metal: texture %s fmt %lu%s usage %#lx storage %lu type %lu %lux%lu mips %lu",how,(unsigned long)d.pixelFormat,
+-+  held!=d.pixelFormat?" (held as RGBA16Float)":"",(unsigned long)d.usage,(unsigned long)d.storageMode,(unsigned long)d.textureType,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.mipmapLevelCount);
+++  held!=d.pixelFormat?(gDexr==2?" (held as BGRA8)":" (held as RGBA16Float)"):"",(unsigned long)d.usage,(unsigned long)d.storageMode,(unsigned long)d.textureType,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.mipmapLevelCount);
+ + sm2_logs(line);
+ +}
+ +static bool textureDescriptor(MTLTextureDescriptor *d,NmbTextureDescriptor *out,bool deviceMemory=false,const char *how="memory") {
+@@ -38,7 +38,7 @@
+ - *out={(uint64_t)d.textureType,(uint64_t)d.pixelFormat,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage,(uint64_t)d.resourceOptions};
+ + const MTLPixelFormat held=deviceMemory?dexr(d.pixelFormat):d.pixelFormat;
+ + noteTextureShape(d,how,held);
+-+ *out={(uint64_t)d.textureType,(uint64_t)held,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage,(uint64_t)d.resourceOptions};
+++ *out={(uint64_t)d.textureType,(uint64_t)held,d.width,d.height,d.depth,d.mipmapLevelCount,d.sampleCount,d.arrayLength,(uint64_t)d.usage|((gDexr==2 && held!=d.pixelFormat)?(uint64_t)MTLTextureUsagePixelFormatView:0ULL),(uint64_t)d.resourceOptions};
+   return true;
+  }
+  static uint64_t sweetTexelBytes(MTLPixelFormat f);
+@@ -46,12 +46,12 @@
+   return (id<MTLTexture>)view;
+  }
+  - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format {
+-+ if(self.pixelFormat==MTLPixelFormatRGBA16Float)format=dexr(format);
+++ if(self.pixelFormat==MTLPixelFormatRGBA16Float || (gDexr==2 && (self.pixelFormat==MTLPixelFormatBGRA8Unorm || self.pixelFormat==MTLPixelFormatBGRA8Unorm_sRGB)))format=dexr(format);
+   return [self view:nmb_texture_new_view(_handle,format,0,nullptr,nullptr,true)];
+  }
+  - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format textureType:(MTLTextureType)type levels:(NSRange)levels slices:(NSRange)slices {
+   const uint64_t l[2]={levels.location,levels.length},s[2]={slices.location,slices.length};
+-+ if(self.pixelFormat==MTLPixelFormatRGBA16Float)format=dexr(format);
+++ if(self.pixelFormat==MTLPixelFormatRGBA16Float || (gDexr==2 && (self.pixelFormat==MTLPixelFormatBGRA8Unorm || self.pixelFormat==MTLPixelFormatBGRA8Unorm_sRGB)))format=dexr(format);
+   id<MTLTexture> v=[self view:nmb_texture_new_view(_handle,format,type,l,s,false)];
+   if(v){((NBTexture *)v).parentRelativeLevel=levels.location;((NBTexture *)v).parentRelativeSlice=slices.location;}
+   return v;
+@@ -60,7 +60,7 @@
+   id<NBTextureViewDesc> desc=(id<NBTextureViewDesc>)d;
+   const MTLPixelFormat df=[desc pixelFormat];
+ - const MTLPixelFormat format=(df!=MTLPixelFormatInvalid)?df:self.pixelFormat;
+-+ const MTLPixelFormat format=(df!=MTLPixelFormatInvalid)?(self.pixelFormat==MTLPixelFormatRGBA16Float?dexr(df):df):self.pixelFormat;
+++ const MTLPixelFormat format=(df!=MTLPixelFormatInvalid)?((self.pixelFormat==MTLPixelFormatRGBA16Float || (gDexr==2 && (self.pixelFormat==MTLPixelFormatBGRA8Unorm || self.pixelFormat==MTLPixelFormatBGRA8Unorm_sRGB)))?dexr(df):df):self.pixelFormat;
+   const MTLTextureType type=[desc textureType];
+   NSRange levels=[desc levelRange],slices=[desc sliceRange];
+   if(!levels.length)levels=NSMakeRange(0,MAX((NSUInteger)1,self.mipmapLevelCount));
+diff --git a/tools/ios27/metal/sbmtlc.c b/tools/ios27/metal/sbmtlc.c
+index fe2b58c..1bb9f5a 100644
+--- a/tools/ios27/metal/sbmtlc.c
++++ b/tools/ios27/metal/sbmtlc.c
+@@ -43,10 +43,12 @@ static int listed(const char *path)
+ }
+ 
+ void sbwall_start(void);
++void sb_backdrop_clamp_init(void);
+ static void install_hooks(void);
+ 
+ __attribute__((constructor)) static void sbmtlc(void)
+ {
++	sb_backdrop_clamp_init();
+ 	sbwall_start();
+ 	int fd = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+ 	int logging = listed("/private/var/local/oslog-clients");
+diff --git a/tools/ios27/metal/sbwall.m b/tools/ios27/metal/sbwall.m
+index a7ba70d..29cdc0e 100644
+--- a/tools/ios27/metal/sbwall.m
++++ b/tools/ios27/metal/sbwall.m
+@@ -9,9 +9,120 @@
+ #import <Foundation/Foundation.h>
+ #import <UIKit/UIKit.h>
+ #import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
++#import <objc/message.h>
++#include <dlfcn.h>
+ #include <fcntl.h>
++#include <stdlib.h>
++#include <sys/sysctl.h>
+ #include <unistd.h>
+ 
++static double g_sb_backdrop_max = 0.25;
++static double (*g_orig_backdrop_scale)(id, SEL);
++static void (*g_orig_backdrop_setScale)(id, SEL, double);
++static id (*g_orig_backdrop_defaultVal)(id, SEL, NSString *);
++
++static double sb_hook_backdrop_scale(id self, SEL _cmd)
++{
++	double s = g_orig_backdrop_scale ? g_orig_backdrop_scale(self, _cmd) : g_sb_backdrop_max;
++	if (s <= 0.0 || s > g_sb_backdrop_max)
++		s = g_sb_backdrop_max;
++	return s;
++}
++
++static void sb_hook_backdrop_setScale(id self, SEL _cmd, double s)
++{
++	if (s > g_sb_backdrop_max)
++		s = g_sb_backdrop_max;
++	if (g_orig_backdrop_setScale)
++		g_orig_backdrop_setScale(self, _cmd, s);
++}
++
++static id sb_hook_backdrop_defaultVal(id self, SEL _cmd, NSString *key)
++{
++	if (key && [key isEqualToString:@"scale"])
++		return @(g_sb_backdrop_max);
++	return g_orig_backdrop_defaultVal ? g_orig_backdrop_defaultVal(self, _cmd, key) : nil;
++}
++
++void sb_backdrop_clamp_init(void)
++{
++	/* Enable Accessibility Reduce Transparency on Mali-G52 MP1 unless disabled via no-reduce-transparency,
++	 * so CoreAnimation Metal draws crisp solid platters without heavy multi-pass Gaussian blur stalls. */
++	if (strcmp(getprogname(), "SpringBoard") == 0 && access("/private/var/local/no-reduce-transparency", F_OK) != 0) {
++		{
++			void *ah = dlopen("/usr/lib/libAccessibility.dylib", RTLD_LAZY);
++			void (*set_rt)(unsigned char) = (void (*)(unsigned char))dlsym(ah ? ah : RTLD_DEFAULT, "_AXSSetEnhanceBackgroundContrastEnabled");
++			unsigned char (*get_rt)(void) = (unsigned char (*)(void))dlsym(ah ? ah : RTLD_DEFAULT, "_AXSEnhanceBackgroundContrastEnabled");
++			int before = get_rt ? (int)get_rt() : -1;
++			if (set_rt)
++				set_rt(1);
++			int after = get_rt ? (int)get_rt() : -1;
++			int rfd = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
++			if (rfd >= 0) {
++				dprintf(rfd, "SBBD[%d]: Reduce Transparency ah=%p set=%p before=%d after=%d\n", getpid(), ah, (void *)set_rt, before, after);
++				close(rfd);
++			}
++			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++				if (set_rt)
++					set_rt(1);
++			});
++		}
++	}
++	double want = 0.25;
++	int sfd = open("/private/var/local/backdrop-scale", O_RDONLY);
++	if (sfd >= 0) {
++		char buf[32] = { 0 };
++		ssize_t n = read(sfd, buf, sizeof(buf) - 1);
++		close(sfd);
++		if (n > 0)
++			want = strtod(buf, NULL);
++	}
++	if (want <= 0.0 || want >= 1.0)
++		return;
++	Class cls = objc_getClass("CABackdropLayer");
++	if (!cls)
++		return;
++	g_sb_backdrop_max = want;
++	SEL scaleSel = sel_registerName("scale");
++	Method mGet = class_getInstanceMethod(cls, scaleSel);
++	if (mGet)
++		g_orig_backdrop_scale = (double (*)(id, SEL))method_setImplementation(mGet, (IMP)sb_hook_backdrop_scale);
++	SEL setScaleSel = sel_registerName("setScale:");
++	Method mSet = class_getInstanceMethod(cls, setScaleSel);
++	if (mSet)
++		g_orig_backdrop_setScale = (void (*)(id, SEL, double))method_setImplementation(mSet, (IMP)sb_hook_backdrop_setScale);
++
++	Class meta = object_getClass((id)cls);
++	SEL defSel = sel_registerName("defaultValueForKey:");
++	Method mDef = meta ? class_getInstanceMethod(meta, defSel) : NULL;
++	if (mDef) {
++		IMP oldDef = method_getImplementation(mDef);
++		g_orig_backdrop_defaultVal = (id (*)(id, SEL, NSString *))oldDef;
++		if (!class_addMethod(meta, defSel, (IMP)sb_hook_backdrop_defaultVal, method_getTypeEncoding(mDef)))
++			method_setImplementation(mDef, (IMP)sb_hook_backdrop_defaultVal);
++	}
++
++	SEL initSel = @selector(init);
++	Method mInit = class_getInstanceMethod(cls, initSel);
++	if (mInit && g_orig_backdrop_setScale) {
++		IMP origInit = method_getImplementation(mInit);
++		IMP newInit = imp_implementationWithBlock(^id(id me) {
++			id obj = ((id (*)(id, SEL))origInit)(me, initSel);
++			if (obj && g_orig_backdrop_setScale)
++				g_orig_backdrop_setScale(obj, setScaleSel, g_sb_backdrop_max);
++			return obj;
++		});
++		if (!class_addMethod(cls, initSel, newInit, method_getTypeEncoding(mInit)))
++			method_setImplementation(mInit, newInit);
++	}
++	int cfd = open("/dev/console", O_WRONLY | O_NOCTTY | O_NONBLOCK);
++	if (cfd >= 0) {
++		dprintf(cfd, "SBBD[%d %s]: CABackdropLayer scale clamped <= %.3f\n", getpid(), getprogname(), g_sb_backdrop_max);
++		close(cfd);
++	}
++}
++
+ #define WALL_PNG "/private/var/local/sbwallpaper.png"
+ #define WALL_WINDOWS "/private/var/local/sbwallpaper-windows"
+ 
+diff --git a/tools/ios27/metal2/HotMetal2.mm b/tools/ios27/metal2/HotMetal2.mm
+index 46dfe56..a39f0ad 100644
+--- a/tools/ios27/metal2/HotMetal2.mm
++++ b/tools/ios27/metal2/HotMetal2.mm
+@@ -323,3 +323,80 @@ @interface SweetMTL2Device : HotMTL2Device
+ @end
+ @implementation SweetMTL2Device
+ @end
++
++static double g_hm2_bd_max = 0.25;
++static double (*g_hm2_orig_scale)(id, SEL);
++static void (*g_hm2_orig_setScale)(id, SEL, double);
++static id (*g_hm2_orig_defVal)(id, SEL, NSString *);
++
++static double hm2_hook_scale(id self, SEL _cmd)
++{
++	double s = g_hm2_orig_scale ? g_hm2_orig_scale(self, _cmd) : g_hm2_bd_max;
++	if (s <= 0.0 || s > g_hm2_bd_max)
++		s = g_hm2_bd_max;
++	return s;
++}
++
++static void hm2_hook_setScale(id self, SEL _cmd, double s)
++{
++	if (s > g_hm2_bd_max)
++		s = g_hm2_bd_max;
++	if (g_hm2_orig_setScale)
++		g_hm2_orig_setScale(self, _cmd, s);
++}
++
++static id hm2_hook_defVal(id self, SEL _cmd, NSString *key)
++{
++	if (key && [key isEqualToString:@"scale"])
++		return @(g_hm2_bd_max);
++	return g_hm2_orig_defVal ? g_hm2_orig_defVal(self, _cmd, key) : nil;
++}
++
++__attribute__((constructor)) static void sm2_backdrop_clamp(void)
++{
++	double want = 0.25;
++	int sfd = open("/private/var/local/backdrop-scale", O_RDONLY);
++	if (sfd >= 0) {
++		char buf[32] = { 0 };
++		ssize_t n = read(sfd, buf, sizeof(buf) - 1);
++		close(sfd);
++		if (n > 0)
++			want = strtod(buf, NULL);
++	}
++	if (want <= 0.0 || want >= 1.0)
++		return;
++	Class cls = objc_getClass("CABackdropLayer");
++	if (!cls)
++		return;
++	g_hm2_bd_max = want;
++	SEL scaleSel = sel_registerName("scale");
++	Method mGet = class_getInstanceMethod(cls, scaleSel);
++	if (mGet)
++		g_hm2_orig_scale = (double (*)(id, SEL))method_setImplementation(mGet, (IMP)hm2_hook_scale);
++	SEL setScaleSel = sel_registerName("setScale:");
++	Method mSet = class_getInstanceMethod(cls, setScaleSel);
++	if (mSet)
++		g_hm2_orig_setScale = (void (*)(id, SEL, double))method_setImplementation(mSet, (IMP)hm2_hook_setScale);
++	Class meta = object_getClass((id)cls);
++	SEL defSel = sel_registerName("defaultValueForKey:");
++	Method mDef = meta ? class_getInstanceMethod(meta, defSel) : NULL;
++	if (mDef) {
++		g_hm2_orig_defVal = (id (*)(id, SEL, NSString *))method_getImplementation(mDef);
++		if (!class_addMethod(meta, defSel, (IMP)hm2_hook_defVal, method_getTypeEncoding(mDef)))
++			method_setImplementation(mDef, (IMP)hm2_hook_defVal);
++	}
++	SEL initSel = @selector(init);
++	Method mInit = class_getInstanceMethod(cls, initSel);
++	if (mInit && g_hm2_orig_setScale) {
++		IMP origInit = method_getImplementation(mInit);
++		IMP newInit = imp_implementationWithBlock(^id(id me) {
++			id obj = ((id (*)(id, SEL))origInit)(me, initSel);
++			if (obj && g_hm2_orig_setScale)
++				g_hm2_orig_setScale(obj, setScaleSel, g_hm2_bd_max);
++			return obj;
++		});
++		if (!class_addMethod(cls, initSel, newInit, method_getTypeEncoding(mInit)))
++			method_setImplementation(mInit, newInit);
++	}
++	sm2_log("CABackdropLayer scale clamped <= %.3f", g_hm2_bd_max);
++}
+diff --git a/userland/src/sbca.c b/userland/src/sbca.c
+index 6a6af03..752ccc4 100644
+--- a/userland/src/sbca.c
++++ b/userland/src/sbca.c
+@@ -961,6 +961,12 @@ sbca_init(void)
+ 		schedule_shots();
+ 		return;
+ 	}
++	/* Disable 10-bit wide-gamut 'w30r' IOSurfaces so OpenGL ES attachImage doesn't drop them */
++	setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
++	CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++	CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++	CFPreferencesSetAppValue(CFSTR("CAEnableDeepFramebuffer"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
++	CFPreferencesSetAppValue(CFSTR("CAAllowDeepColor"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
+ 	/* eagl.c says what it does on stderr */
+ 	if (logfd >= 0) {
+ 		dup2(logfd, 2);
+diff --git a/wifi/lx/src/lx_wpa.c b/wifi/lx/src/lx_wpa.c
+index 88859cf..547b451 100644
+--- a/wifi/lx/src/lx_wpa.c
++++ b/wifi/lx/src/lx_wpa.c
+@@ -429,7 +429,7 @@ group_key(struct lx_wpa *wpa, const uint8_t *data, unsigned length, const uint8_
+ 		 * is not installed with stale bytes of `group` filling it out.
+ 		 */
+ 		if (e[0] == 0xdd && e[1] >= 6 + 5 && e[2] == 0x00 && e[3] == 0x0f && e[4] == 0xac && e[5] == 1 &&
+-		    e[1] - 6u == 16 && (e[6] & 3) != 0) {
++		    (e[1] - 6u == 16 || e[1] - 6u == 32) && (e[6] & 3) != 0) {
+ 			wpa->group_index = e[6] & 3;
+ 			wpa->group_length = e[1] - 6u;
+ 			memcpy(wpa->group, e + 8, wpa->group_length);

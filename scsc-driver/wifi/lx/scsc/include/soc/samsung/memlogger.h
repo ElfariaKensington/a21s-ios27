@@ -1,0 +1,3 @@
+#ifndef _LX_SOC_SAMSUNG_MEMLOGGER_H_
+#define _LX_SOC_SAMSUNG_MEMLOGGER_H_
+#endif

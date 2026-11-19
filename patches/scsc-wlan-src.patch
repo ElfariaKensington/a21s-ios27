@@ -1,0 +1,487 @@
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/cfg80211_ops.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/cfg80211_ops.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/cfg80211_ops.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/cfg80211_ops.c	2026-11-19 03:01:18
+@@ -1191,7 +1191,7 @@
+ 		const u8 *rsn;
+ 
+ 		SLSI_NET_DBG1(dev, SLSI_CFG80211, "N AKM Suites: : %1d\n", sme->crypto.n_akm_suites);
+-		rsn = cfg80211_find_ie(WLAN_EID_RSN, sme->ie, sme->ie_len);
++		rsn = lx_find_ie_safe(WLAN_EID_RSN, sme->ie, sme->ie_len);
+ 
+ #ifdef CONFIG_SCSC_WLAN_SAE_CONFIG
+ 		if (rsn) {
+@@ -3588,64 +3588,10 @@
+ }
+ 
+ static struct cfg80211_ops slsi_ops = {
+-	.add_virtual_intf = slsi_add_virtual_intf,
+-	.del_virtual_intf = slsi_del_virtual_intf,
+-	.change_virtual_intf = slsi_change_virtual_intf,
+-
+ 	.scan = slsi_scan,
+ 	.connect = slsi_connect,
+ 	.disconnect = slsi_disconnect,
+-
+-	.add_key = slsi_add_key,
+-	.del_key = slsi_del_key,
+-	.get_key = slsi_get_key,
+-	.set_default_key = slsi_set_default_key,
+-	.set_default_mgmt_key = slsi_config_default_mgmt_key,
+-
+-	.set_wiphy_params = slsi_set_wiphy_params,
+-
+-	.del_station = slsi_del_station,
+ 	.get_station = slsi_get_station,
+-	.set_tx_power = slsi_set_tx_power,
+-	.get_tx_power = slsi_get_tx_power,
+-	.set_power_mgmt = slsi_set_power_mgmt,
+-
+-	.suspend = slsi_suspend,
+-	.resume = slsi_resume,
+-
+-	.set_pmksa = slsi_set_pmksa,
+-	.del_pmksa = slsi_del_pmksa,
+-	.flush_pmksa = slsi_flush_pmksa,
+-
+-	.remain_on_channel = slsi_remain_on_channel,
+-	.cancel_remain_on_channel = slsi_cancel_remain_on_channel,
+-
+-	.change_bss = slsi_change_bss,
+-
+-	.start_ap = slsi_start_ap,
+-	.change_beacon = slsi_change_beacon,
+-	.stop_ap = slsi_stop_ap,
+-
+-	.sched_scan_start = slsi_sched_scan_start,
+-	.sched_scan_stop = slsi_sched_scan_stop,
+-
+-	.mgmt_frame_register = slsi_mgmt_frame_register,
+-	.mgmt_tx = slsi_mgmt_tx,
+-	.mgmt_tx_cancel_wait = slsi_mgmt_tx_cancel_wait,
+-	.set_txq_params = slsi_set_txq_params,
+-#ifdef CONFIG_SCSC_WLAN_SAE_CONFIG
+-	.external_auth = slsi_synchronised_response,
+-#endif
+-#ifdef CONFIG_SCSC_WLAN_MAC_ACL_PER_MAC
+-	.set_mac_acl = slsi_set_mac_acl_per_mac,
+-#else
+-	.set_mac_acl = slsi_set_mac_acl,
+-#endif
+-	.update_ft_ies = slsi_update_ft_ies,
+-	.tdls_oper = slsi_tdls_oper,
+-	.set_monitor_channel = slsi_set_monitor_channel,
+-	.set_qos_map = slsi_set_qos_map,
+-	.channel_switch = slsi_channel_switch
+ };
+ 
+ #define RATE_LEGACY(_rate, _hw_value, _flags) { \
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/cm_if.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/cm_if.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/cm_if.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/cm_if.c	2026-11-19 00:16:02
+@@ -685,9 +685,9 @@
+ 
+ 	atomic_set(&sdev->cm_if.cm_if_state, SCSC_WIFI_CM_IF_STATE_STARTING);
+ #ifdef CONFIG_SCSC_PCIE
+-	err = scsc_mx_service_mifram_alloc(sdev->service, 1.5 * 1024 * 1024, &sdev->hip4_inst.hip_ref, 4096);
++	err = scsc_mx_service_mifram_alloc(sdev->service, (3 * 1024 * 1024 / 2), &sdev->hip4_inst.hip_ref, 4096);
+ #else
+-	err = scsc_mx_service_mifram_alloc(sdev->service, 2.5 * 1024 * 1024, &sdev->hip4_inst.hip_ref, 4096);
++	err = scsc_mx_service_mifram_alloc(sdev->service, (5 * 1024 * 1024 / 2), &sdev->hip4_inst.hip_ref, 4096);
+ #endif
+ 	if (err) {
+ 		SLSI_WARN(sdev, "scsc_mx_service_mifram_alloc failed err: %d\n", err);
+@@ -867,9 +867,9 @@
+ 	SLSI_INFO(sdev, "Allocate mifram\n");
+ 
+ #ifdef CONFIG_SCSC_PCIE
+-	err = scsc_mx_service_mifram_alloc(sdev->service, 1.5 * 1024 * 1024, &sdev->hip4_inst.hip_ref, 4096);
++	err = scsc_mx_service_mifram_alloc(sdev->service, (3 * 1024 * 1024 / 2), &sdev->hip4_inst.hip_ref, 4096);
+ #else
+-	err = scsc_mx_service_mifram_alloc(sdev->service, 2.5 * 1024 * 1024, &sdev->hip4_inst.hip_ref, 4096);
++	err = scsc_mx_service_mifram_alloc(sdev->service, (5 * 1024 * 1024 / 2), &sdev->hip4_inst.hip_ref, 4096);
+ #endif
+ 	if (err) {
+ 		SLSI_WARN(sdev, "scsc_mx_service_mifram_alloc failed err: %d\n", err);
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/debug.h work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/debug.h
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/debug.h	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/debug.h	2026-11-19 00:16:02
+@@ -75,7 +75,7 @@
+  */
+ 
+ #define SLSI_EWI_NODEV_LABEL "ieee80211 phy.: "
+-#define SLSI_EWI_DEV(sdev) (likely((sdev) && ((sdev)->wiphy)) ? &((sdev)->wiphy->dev) : NULL)
++#define SLSI_EWI_DEV(sdev) (likely((sdev) && ((sdev)->wiphy)) ? wiphy_dev((sdev)->wiphy) : NULL)
+ #define SLSI_EWI_NET_DEV(ndev) (likely(ndev) ? SLSI_EWI_DEV(((struct netdev_vif *)netdev_priv(ndev))->sdev) : NULL)
+ #define SLSI_EWI_NET_NAME(ndev) (likely(ndev) ? netdev_name(ndev) : NULL)
+ 
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/dev.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/dev.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/dev.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/dev.c	2026-11-19 00:16:02
+@@ -221,68 +221,15 @@
+ 
+ static int slsi_dev_inetaddr_changed(struct notifier_block *nb, unsigned long data, void *arg)
+ {
+-	struct slsi_dev     *sdev = container_of(nb, struct slsi_dev, inetaddr_notifier);
+-	struct in_ifaddr    *ifa = arg;
+-	struct net_device   *dev = ifa->ifa_dev->dev;
+-	struct wireless_dev *wdev = dev->ieee80211_ptr;
+-	struct netdev_vif   *ndev_vif = netdev_priv(dev);
+-
+-	if (!wdev)
+-		return NOTIFY_DONE;
+-
+-	if (wdev->wiphy != sdev->wiphy)
+-		return NOTIFY_DONE;
+-
+-	if (data == NETDEV_DOWN) {
+-		SLSI_NET_DBG2(dev, SLSI_NETDEV, "Returning 0 for NETDEV_DOWN event\n");
+-		return 0;
+-	}
+-
+-	SLSI_NET_INFO(dev, "IP: %pI4\n", &ifa->ifa_address);
+-	SLSI_MUTEX_LOCK(ndev_vif->vif_mutex);
+-#ifndef SLSI_TEST_DEV
+-	if (SLSI_IS_VIF_INDEX_WLAN(ndev_vif) && slsi_wake_lock_active(&sdev->wlan_wl_roam)) {
+-		SLSI_NET_DBG2(dev, SLSI_NETDEV, "Releasing the roaming wakelock\n");
+-		slsi_wake_unlock(&sdev->wlan_wl_roam);
+-		/* If upper layers included wps ie in connect but the actually
+-		 * connection is not for wps, reset the wps flag.
+-		 */
+-		if (ndev_vif->sta.is_wps) {
+-			SLSI_NET_DBG1(dev, SLSI_NETDEV,
+-				      "is_wps set but not wps connection.\n");
+-			ndev_vif->sta.is_wps = false;
+-		}
+-	}
+-#endif
+-	slsi_ip_address_changed(sdev, dev, ifa->ifa_address);
+-	SLSI_MUTEX_UNLOCK(ndev_vif->vif_mutex);
+-	return 0;
++	(void)nb; (void)data; (void)arg;
++	return NOTIFY_DONE;
+ }
+ 
+ #if IS_ENABLED(CONFIG_IPV6)
+ static int slsi_dev_inet6addr_changed(struct notifier_block *nb, unsigned long data, void *arg)
+ {
+-	struct slsi_dev     *sdev = container_of(nb, struct slsi_dev, inet6addr_notifier);
+-	struct inet6_ifaddr *ifa = arg;
+-	struct net_device   *dev = ifa->idev->dev;
+-	struct wireless_dev *wdev = dev->ieee80211_ptr;
+-	struct netdev_vif   *ndev_vif = netdev_priv(dev);
+-
+-	(void)data; /* unused */
+-
+-	if (!wdev)
+-		return NOTIFY_DONE;
+-
+-	if (wdev->wiphy != sdev->wiphy)
+-		return NOTIFY_DONE;
+-
+-	SLSI_NET_INFO(dev, "IPv6: %pI6\n", &ifa->addr.s6_addr);
+-
+-	slsi_spinlock_lock(&ndev_vif->ipv6addr_lock);
+-	memcpy(&ndev_vif->ipv6address, &ifa->addr, sizeof(struct in6_addr));
+-	slsi_spinlock_unlock(&ndev_vif->ipv6addr_lock);
+-
+-	return 0;
++	(void)nb; (void)data; (void)arg;
++	return NOTIFY_DONE;
+ }
+ #endif
+ 
+@@ -710,9 +657,8 @@
+ 	SLSI_INFO_NODEV("--- Maxwell Wi-Fi driver unloaded successfully ---\n");
+ }
+ 
+-module_init(slsi_dev_load);
+-module_exit(slsi_dev_unload);
+-
++int lx_slsi_wlan_driver_init(void) { return slsi_dev_load(); }
++void lx_slsi_wlan_driver_exit(void) { slsi_dev_unload(); }
+ MODULE_DESCRIPTION("mx140 Wi-Fi Driver");
+ MODULE_AUTHOR("SLSI");
+ MODULE_LICENSE("GPL and additional rights");
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/mgt.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/mgt.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/mgt.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/mgt.c	2026-11-19 00:16:02
+@@ -171,8 +171,10 @@
+ }
+ 
+ /* Register sysfs mac address override */
++void lx_slsi_set_mac_override_str(const char *m) { if (m) strlcpy(sysfs_mac_override, m, sizeof(sysfs_mac_override)); }
+ void slsi_create_sysfs_macaddr(void)
+ {
++	return;
+ #ifndef SLSI_TEST_DEV
+ 	int r;
+ 
+@@ -195,7 +197,7 @@
+ 
+ /* Unregister sysfs mac address override */
+ void slsi_destroy_sysfs_macaddr(void)
+-{
++{ return;
+ 	if (!wifi_kobj_ref)
+ 		return;
+ 
+@@ -236,7 +238,7 @@
+ 
+ /* Register sysfs version information */
+ void slsi_create_sysfs_version_info(void)
+-{
++{ return;
+ #ifndef SLSI_TEST_DEV
+ 	int r;
+ 
+@@ -259,7 +261,7 @@
+ 
+ /* Unregister sysfs version information */
+ void slsi_destroy_sysfs_version_info(void)
+-{
++{ return;
+ 	if (!wifi_kobj_ref)
+ 		return;
+ 
+@@ -607,7 +609,7 @@
+ 
+ 	SLSI_INFO(sdev, "Succeed to write firmware/host information to .wifiver.info\n");
+ #else
+-	SLSI_UNUSED_PARAMETER(filepath);
++	
+ #endif
+ }
+ 
+@@ -8127,7 +8129,7 @@
+ 
+ /* Register sysfs pm */
+ void slsi_create_sysfs_pm(void)
+-{
++{ return;
+ 	int r;
+ 
+ 	wifi_kobj_ref = mxman_wifi_kobject_ref_get();
+@@ -8148,7 +8150,7 @@
+ 
+ /* Unregister sysfs pm */
+ void slsi_destroy_sysfs_pm(void)
+-{
++{ return;
+ 	if (!wifi_kobj_ref)
+ 		return;
+ 
+@@ -8189,7 +8191,7 @@
+ 
+ /* Register sysfs ant */
+ void slsi_create_sysfs_ant(void)
+-{
++{ return;
+ 	int r;
+ 
+ 	wifi_kobj_ref = mxman_wifi_kobject_ref_get();
+@@ -8210,7 +8212,7 @@
+ 
+ /* Unregister sysfs ant */
+ void slsi_destroy_sysfs_ant(void)
+-{
++{ return;
+ 	if (!wifi_kobj_ref)
+ 		return;
+ 
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/mlme.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/mlme.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/mlme.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/mlme.c	2026-11-19 03:01:16
+@@ -2186,7 +2186,7 @@
+ 	} else if (sme->crypto.wpa_versions == NL80211_WPA_VERSION_2
+ 			|| sme->crypto.wpa_versions == NL80211_WPA_VERSION_3) {
+ 		/* RSN */
+-		ptr = cfg80211_find_ie(WLAN_EID_RSN, sme->ie, sme->ie_len);
++		ptr = lx_find_ie_safe(WLAN_EID_RSN, sme->ie, sme->ie_len);
+ 
+ 		if (ptr) {
+ 			/* version index is 2 for RSN */
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/netif.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/netif.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/netif.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/netif.c	2026-11-19 00:16:02
+@@ -81,7 +81,7 @@
+ module_param(gro_flush_timeout, ulong, S_IRUGO | S_IWUSR);
+ MODULE_PARM_DESC(gro_flush_timeout, "GRO timeout (in ns)");
+ #endif
+-#ifndef CONFIG_ARM
++#if 0 /* disabled on LinuxKPI: no tcp_sk() */
+ static bool tcp_ack_suppression_disable;
+ module_param(tcp_ack_suppression_disable, bool, S_IRUGO | S_IWUSR);
+ MODULE_PARM_DESC(tcp_ack_suppression_disable, "Disable TCP ack suppression feature");
+@@ -223,13 +223,18 @@
+ #endif
+ }
+ 
++#ifndef SLSI_IS_VIF_INDEX_MHS_DUALSTA
++#define SLSI_IS_VIF_INDEX_MHS_DUALSTA(sdev, ndev_vif) (false)
++#endif
+ static inline bool slsi_netif_is_udp_pkt(struct sk_buff *skb)
+ {
+-	if (ip_hdr(skb)->version == 4)
+-		return (ip_hdr(skb)->protocol == IPPROTO_UDP);
+-	else if (ip_hdr(skb)->version == 6)
+-		return (ipv6_hdr(skb)->nexthdr == NEXTHDR_UDP);
+-
++	const u8 *nh = skb_network_header(skb);
++	if (!nh || nh < skb->head || nh + 20 > skb_tail_pointer(skb))
++		return false;
++	if ((nh[0] >> 4) == 4)
++		return nh[9] == IPPROTO_UDP;
++	if ((nh[0] >> 4) == 6 && nh + 40 <= skb_tail_pointer(skb))
++		return nh[6] == NEXTHDR_UDP;
+ 	return false;
+ }
+ 
+@@ -406,7 +411,7 @@
+ 	ndev_vif->is_available = true;
+ 	sdev->netdev_up_count++;
+ 
+-#ifndef CONFIG_ARM
++#if 0 /* disabled on LinuxKPI: no tcp_sk() */
+ 	slsi_netif_tcp_ack_suppression_start(dev);
+ #endif
+ 
+@@ -456,7 +461,7 @@
+ 		slsi_wake_unlock(&sdev->wlan_wl);
+ 		return 0;
+ 	}
+-#ifndef CONFIG_ARM
++#if 0 /* disabled on LinuxKPI: no tcp_sk() */
+ 	slsi_netif_tcp_ack_suppression_stop(dev);
+ #endif
+ 	SLSI_MUTEX_LOCK(sdev->netdev_add_remove_mutex);
+@@ -914,7 +919,9 @@
+ 	else
+ 		tdls_peer->valid = false;
+ 
+-	/* Move packets from netdev queues */
++	slsi_tx_unpause_queues(sdev);
++	if (1) return;
++#if 0
+ 	for (i = 0; i < SLSI_NETIF_Q_PER_PEER; i++) {
+ 		SLSI_NET_DBG2(dev, SLSI_TDLS, "NETQ%d: Before: tdlsq_len = %d, staq_len = %d\n",
+ 			      i, dev->_tx[tdlsq + i].qdisc->q.qlen, dev->_tx[staq + i].qdisc->q.qlen);
+@@ -1026,7 +1033,7 @@
+ 				SLSI_NET_ERR(dev, "tdls_teardown: Packet present in NET queue %d\n", tdlsq + i);
+ 		}
+ 
+-	/* Resume the STA and TDLS netdev queues */
++#endif
+ 	slsi_tx_unpause_queues(sdev);
+ }
+ 
+@@ -1146,7 +1153,7 @@
+ #endif
+ #endif
+ 
+-#ifndef CONFIG_ARM
++#if 0 /* disabled on LinuxKPI: no tcp_sk() */
+ 	skb = slsi_netif_tcp_ack_suppression_pkt(dev, skb);
+ 	if (!skb) {
+ 		slsi_wake_unlock(&sdev->wlan_wl);
+@@ -1377,78 +1384,10 @@
+ #endif
+ #endif
+ 
+-static void slsi_netif_rps_map_clear(struct net_device *dev)
+-{
+-	struct rps_map *map;
++static void slsi_netif_rps_map_clear(struct net_device *dev) { (void)dev; }
+ 
+-	map = rcu_dereference_protected(dev->_rx->rps_map, 1);
+-	if (map) {
+-		RCU_INIT_POINTER(dev->_rx->rps_map, NULL);
+-		kfree_rcu(map, rcu);
+-		SLSI_NET_INFO(dev, "clear rps_cpus map\n");
+-	}
+-}
++static int slsi_netif_rps_map_set(struct net_device *dev, char *buf, size_t len) { (void)dev; (void)buf; return (int)len; }
+ 
+-static int slsi_netif_rps_map_set(struct net_device *dev, char *buf, size_t len)
+-{
+-	struct rps_map *old_map, *map;
+-	cpumask_var_t mask;
+-	int err, cpu, i;
+-	static DEFINE_SPINLOCK(rps_map_lock);
+-
+-	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+-		return -ENOMEM;
+-
+-	err = bitmap_parse(buf, len, cpumask_bits(mask), nr_cpumask_bits);
+-	if (err) {
+-		free_cpumask_var(mask);
+-		SLSI_NET_WARN(dev, "CPU bitmap parse failed\n");
+-		return err;
+-	}
+-
+-	map = kzalloc(max_t(unsigned int, RPS_MAP_SIZE(cpumask_weight(mask)), L1_CACHE_BYTES), GFP_KERNEL);
+-	if (!map) {
+-		free_cpumask_var(mask);
+-		SLSI_NET_WARN(dev, "CPU mask alloc failed\n");
+-		return -ENOMEM;
+-	}
+-
+-	i = 0;
+-	for_each_cpu_and(cpu, mask, cpu_online_mask)
+-		map->cpus[i++] = cpu;
+-
+-	if (i) {
+-		map->len = i;
+-	} else {
+-		kfree(map);
+-		map = NULL;
+-	}
+-
+-	spin_lock(&rps_map_lock);
+-	old_map = rcu_dereference_protected(dev->_rx->rps_map, lockdep_is_held(&rps_map_lock));
+-	rcu_assign_pointer(dev->_rx->rps_map, map);
+-	spin_unlock(&rps_map_lock);
+-
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+-	if (map)
+-		static_branch_inc(&rps_needed);
+-	if (old_map)
+-		static_branch_dec(&rps_needed);
+-#else
+-	if (map)
+-		static_key_slow_inc(&rps_needed);
+-	if (old_map)
+-		static_key_slow_dec(&rps_needed);
+-#endif
+-
+-	if (old_map)
+-		kfree_rcu(old_map, rcu);
+-
+-	free_cpumask_var(mask);
+-	SLSI_NET_INFO(dev, "rps_cpus map set(%s)\n", buf);
+-	return len;
+-}
+-
+ static void slsi_set_multicast_filter_work(struct work_struct *data)
+ {
+ 	struct netdev_vif   *ndev_vif = container_of(data, struct netdev_vif, set_multicast_filter_work);
+@@ -2094,7 +2033,7 @@
+ 	slsi_netif_remove_all(sdev);
+ }
+ 
+-#ifndef CONFIG_ARM
++#if 0 /* disabled on LinuxKPI: no tcp_sk() */
+ static int slsi_netif_tcp_ack_suppression_start(struct net_device *dev)
+ {
+ 	int index;
+diff -ruN refs/exynos850-scsc/drivers/net/wireless/scsc/rx.c work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/rx.c
+--- refs/exynos850-scsc/drivers/net/wireless/scsc/rx.c	2026-11-18 23:08:10
++++ work/xnu-deps/build/scsc/src/drivers/net/wireless/scsc/rx.c	2026-11-19 03:01:19
+@@ -3148,7 +3148,7 @@
+ 		 * For secured AP, all this would be done after handshake
+ 		 */
+ 		if ((peer->capabilities & WLAN_CAPABILITY_PRIVACY) &&
+-		    (cfg80211_find_ie(WLAN_EID_RSN, assoc_ie, assoc_ie_len) ||
++		    (lx_find_ie_safe(WLAN_EID_RSN, assoc_ie, assoc_ie_len) ||
+ 		     cfg80211_find_ie(SLSI_WLAN_EID_WAPI, assoc_ie, assoc_ie_len) ||
+ 		     cfg80211_find_vendor_ie(WLAN_OUI_MICROSOFT, WLAN_OUI_TYPE_MICROSOFT_WPA, assoc_ie, assoc_ie_len))) {
+ 			/*secured AP*/

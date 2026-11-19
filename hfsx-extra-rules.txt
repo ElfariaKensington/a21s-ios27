@@ -1,0 +1,63 @@
+prefix 501:501 /private/var/mobile
+prefix 501:501 /jb/var/mobile
+prefix 272:272 /private/var/db/diagnostics
+prefix 272:272 /private/var/db/uuidtext
+prefix 64:501 /private/var/Keychains
+exact 64:501 0775 /private/var/Keychains
+prefix 282:0 /private/var/protected/trustd
+prefix 501:501 /private/var/Managed Preferences/mobile
+prefix 501:501 /private/var/buddy
+prefix 501:501 /private/var/datamigrator
+prefix 270:270 /private/var/dextcores
+prefix 33:33 /private/var/installd
+prefix 24:24 /private/var/networkd
+prefix 25:25 /private/var/wireless
+prefix 65:0 /private/var/log/mDNSResponder
+prefix 501:501 /private/var/logs/WindowServer
+prefix 501:501 /private/var/logs/hidfw-crashlogs
+prefix 501:501 /private/var/logs/mediaserverd
+prefix 272:272 /private/var/preferences/Logging
+prefix 501:501 /private/var/db/ConnectivityPowerTableUpdates
+prefix 501:501 /private/var/db/UpdateMetrics
+prefix 278:278 /private/var/db/accessoryupdater
+prefix 263:263 /private/var/db/analyticsd
+prefix 300:300 /private/var/db/aonsensed
+prefix 245:245 /private/var/db/astris
+prefix 501:501 /private/var/db/biome
+prefix 501:501 /private/var/db/com.apple.devicemanagementclient
+prefix 501:501 /private/var/db/com.apple.findmy.findmybeaconingd
+prefix 304:304 /private/var/db/com.apple.naturallanguaged
+prefix 280:280 /private/var/db/coreml
+prefix 284:284 /private/var/db/darwindaemon
+prefix 257:257 /private/var/db/datadetectors
+prefix 271:271 /private/var/db/diskimagesiod
+prefix 297:297 /private/var/db/eligibilityd
+prefix 254:254 /private/var/db/findmydevice
+prefix 501:501 /private/var/db/fpsd
+prefix 267:267 /private/var/db/gpsd
+prefix 279:279 /private/var/db/knowledgegraphd
+prefix 213:213 /private/var/db/lockdown
+prefix 501:501 /private/var/db/lsd
+prefix 283:283 /private/var/db/mmaintenanced
+prefix 301:301 /private/var/db/modelmanagerd
+prefix 501:501 /private/var/db/nearbyd
+prefix 297:297 /private/var/db/os_eligibility
+prefix 269:269 /private/var/db/reportmemoryexception
+prefix 277:277 /private/var/db/rmd
+prefix 303:303 /private/var/db/swtransparencyd
+prefix 266:266 /private/var/db/timed
+exact 0:0 0600 /private/var/keybags/systembag.kb
+exact 0:0 0700 /private/var/keybags
+exact 0:0 1777 /private/var/tmp
+exact 0:0 0777 /private/var/local/oslog
+exact 0:0 0777 /private/var/local/m2v-cache
+exact 0:0 0666 /private/var/local/mtl2.log
+exact 0:0 4755 /jb/Applications/Sileo.app/giveMeRoot
+exact 0:0 4755 /Applications/Sileo.app/giveMeRoot
+exact 0:0 4755 /jb/usr/bin/chpass
+exact 0:0 4755 /jb/usr/bin/login
+exact 0:0 4755 /jb/usr/bin/newgrp
+exact 0:0 4755 /jb/usr/bin/passwd
+exact 0:0 2755 /jb/usr/bin/quota
+exact 0:0 4755 /jb/usr/bin/su
+exact 0:0 4755 /jb/usr/bin/sudo
